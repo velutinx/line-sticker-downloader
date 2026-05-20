@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+        <input type="number" id="delay" value="1000">
+    </div>
+
+    <button id="downloadBtn">
+        Download Stickers
+    </button>
+
+    <div id="status"></div>
+</div>
+
+<script>
+const button = document.getElementById('downloadBtn');
+const statusDiv = document.getElementById('status');
+
+button.addEventListener('click', async () => {
+
+    const url = document.getElementById('url').value.trim();
+    const convertToGif = document.getElementById('gif').checked;
+    const animatedWaitDelay = parseInt(document.getElementById('delay').value);
+
+    if (!url) {
+        alert('Please enter a LINE sticker URL');
+        return;
+    }
+
+    statusDiv.innerText = 'Downloading...';
+
+    try {
+
+        const response = await fetch('http://localhost:3000/download', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                url,
+                convertToGif,
+                animatedWaitDelay
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Download failed');
+        }
+
+        const blob = await response.blob();
+
+        const downloadUrl = window.URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = 'line-stickers.zip';
+
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        window.URL.revokeObjectURL(downloadUrl);
+
+        statusDiv.innerText = 'Download complete';
+
+    } catch (err) {
+        console.error(err);
+        statusDiv.innerText = err.message;
+    }
+});
+</script>
+
+</body>
+</html>
