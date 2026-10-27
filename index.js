@@ -32,7 +32,7 @@ function createContext(config) {
   const {
     url,
     dest = "stickers",
-    animatedWaitDelay = 3000, // Increased default wait time
+    animatedWaitDelay = 3000,
     convertToGif = false,
   } = config;
 
@@ -112,13 +112,17 @@ async function scrapeStickerUrls(context) {
     );
 
     let url;
+    let isAnimated = false;
 
-    if (canvasHandles.length === 2) {
+    // FIXED: Check if there are ANY canvases, and grab the last one (the newest)
+    if (canvasHandles.length > 0) {
       url = await page.evaluate(
         (el) => el.getAttribute("data-apng-src"),
-        canvasHandles[1]
+        canvasHandles[canvasHandles.length - 1]
       );
+      isAnimated = true;
     } else {
+      // Fallback to static background image
       url = await page.evaluate(
         (el) =>
           el.style.backgroundImage.replace(
@@ -129,6 +133,7 @@ async function scrapeStickerUrls(context) {
       );
     }
 
+    console.log(`Sticker ${index}/${total}: Found ${isAnimated ? 'ANIMATED' : 'STATIC'} URL: ${url}`);
     stickerUrls.push(url);
   }
 
@@ -202,7 +207,7 @@ async function downloadStickers(config = {}) {
             await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
             console.log(`[apng2gif] Success: ${pngPath} -> ${gifPath}`);
           } catch (err) {
-            console.error(`[apng2gif] Failed to convert ${pngPath}:`, err);
+            console.error(`[apng2gif] Failed to convert ${pngPath}:`, err.message);
           }
         })
       );
@@ -230,7 +235,7 @@ app.post("/download", async (req, res) => {
     const {
       url,
       convertToGif = false,
-      animatedWaitDelay = 3000, // Increased default here as well
+      animatedWaitDelay = 3000,
     } = req.body;
 
     if (!url) {
@@ -257,7 +262,6 @@ app.post("/download", async (req, res) => {
       },
     });
 
-    // Attach listeners BEFORE finalize
     output.on("close", () => {
       res.download(
         zipPath,
