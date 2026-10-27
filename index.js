@@ -23,6 +23,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function createContext(config) {
   const { url, dest = "stickers", convertToGif = false } = config;
   return {
@@ -67,7 +69,6 @@ async function scrapeStickerUrls(context) {
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
     
-    // Log the first sticker's JSON structure so we can see exactly how LINE labels it
     if (i === 0) {
       console.log("--- DEBUG: First Sticker JSON ---");
       console.log(JSON.stringify(sticker, null, 2));
@@ -76,7 +77,6 @@ async function scrapeStickerUrls(context) {
 
     let suffix = "sticker@2x.png";
     
-    // Check if it's animated or sound (APNG)
     if (sticker.stickerType === "ANIMATION" || sticker.stickerType === "SOUND") {
       suffix = "animation@2x.png";
       animatedCount++;
@@ -103,33 +103,51 @@ async function downloadStickers(config = {}) {
 
     context.spinner.text = `Downloading ${urls.length} stickers...`;
     
-    await Promise.allSettled(
-      urls.map((url, i) =>
-        downloadImage({ url, dest: path.join(dest, `sticker-${i + 1}.png`) })
-      )
-    );
+    // SEQUENTIAL DOWNLOAD to avoid rate limiting
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      const fileDest = path.join(dest, `sticker-${i + 1}.png`);
+      
+      try {
+        await downloadImage({
+          url,
+          dest: fileDest,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://store.line.me/"
+          }
+        });
+        context.spinner.text = `Downloaded ${i + 1}/${urls.length}...`;
+      } catch (err) {
+        console.error(`[Download Failed] Sticker ${i + 1}:`, err.message);
+      }
+      
+      // Small delay to prevent CDN rate limits
+      await sleep(150); 
+    }
 
     if (convertToGif) {
       context.spinner.text = `Converting stickers to GIF...`;
       
-      await Promise.allSettled(
-        urls.map(async (url, i) => {
-          const pngPath = path.join(dest, `sticker-${i + 1}.png`);
-          const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
-          
-          if (!fs.existsSync(pngPath)) return;
+      // SEQUENTIAL CONVERSION
+      for (let i = 0; i < urls.length; i++) {
+        const pngPath = path.join(dest, `sticker-${i + 1}.png`);
+        const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
+        
+        if (!fs.existsSync(pngPath)) continue;
 
-          try {
-            // Run the binary and capture stdout/stderr
-            const { stdout, stderr } = await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
-            console.log(`[apng2gif] SUCCESS: sticker-${i + 1}.gif`, stdout, stderr);
-          } catch (err) {
-            // If it's a static PNG, apng2gif will fail. We log the exact error to see if it's a static image or a missing library.
-            console.log(`[apng2gif] FAILED sticker-${i + 1}:`, err.message);
-            if (err.stderr) console.log(`[apng2gif] STDERR:`, err.stderr);
-          }
-        })
-      );
+        try {
+          // Ensure binary is executable
+          try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (e) {}
+          
+          const { stdout, stderr } = await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
+          console.log(`[apng2gif] SUCCESS: sticker-${i + 1}.gif`);
+        } catch (err) {
+          // Static PNGs will fail here, which is expected.
+          console.log(`[apng2gif] FAILED sticker-${i + 1}:`, err.message);
+          if (err.stderr) console.log(`[apng2gif] STDERR:`, err.stderr);
+        }
+      }
     }
 
     spinner.succeed(chalk.green(`Saved stickers to ${dest}/`));
