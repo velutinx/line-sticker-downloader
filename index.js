@@ -21,7 +21,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function createContext(config) {
   const { url, dest = "stickers" } = config;
   return {
-    spinner: ora("Fetching sticker data..."),
+    spinner: ora("Fetching pack data..."),
     config: { url, dest },
   };
 }
@@ -29,14 +29,17 @@ function createContext(config) {
 async function scrapeStickerData(context) {
   const { url: pageUrl } = context.config;
 
-  const productIdMatch = pageUrl.match(/\/product\/(\d+)/);
-  if (!productIdMatch) {
-    throw new Error("Could not extract product ID from the provided URL.");
+  // Support both /stickershop/product/ and /emojishop/product/ (supports numeric or alphanumeric IDs)
+  const match = pageUrl.match(/\/(stickershop|emojishop)\/product\/([a-zA-Z0-9]+)/);
+  if (!match) {
+    throw new Error("Could not extract product type or ID from the provided URL.");
   }
-  const productId = productIdMatch[1];
+  
+  const shopType = match[1]; // 'stickershop' or 'emojishop'
+  const productId = match[2];
 
-  // 1. Fetch metadata JSON for stickers
-  const metaUrl = `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`;
+  // 1. Fetch metadata JSON based on whether it's stickers or emoji
+  const metaUrl = `https://stickershop.line-scdn.net/${shopType}/v1/product/${productId}/iphone/productInfo.meta`;
   const metaRes = await fetch(metaUrl, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -50,52 +53,63 @@ async function scrapeStickerData(context) {
 
   const meta = await metaRes.json();
 
-  if (!meta.stickers || !Array.isArray(meta.stickers) || meta.stickers.length === 0) {
-    throw new Error("No stickers found in the product metadata.");
+  // Emojis use meta.emoji instead of meta.stickers
+  const itemsList = meta.stickers || meta.emojis;
+  if (!itemsList || !Array.isArray(itemsList) || itemsList.length === 0) {
+    throw new Error("No items found in the product metadata.");
   }
 
-  // 2. Extract title from metadata JSON if available, or fetch HTML with full browser headers as fallback
-  let packTitle = meta.title?.en || meta.packageTitle?.en || `LINE Stickers ${productId}`;
+  // 2. Extract pack title
+  let packTitle = meta.title?.en || meta.packageTitle?.en || `${shopType === 'emojishop' ? 'LINE Emojis' : 'LINE Stickers'} ${productId}`;
   
-  if (!meta.title && !meta.packageTitle) {
-    try {
-      const htmlRes = await fetch(pageUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5"
-        }
-      });
-      if (htmlRes.ok) {
-        const htmlText = await htmlRes.text();
-        const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
-        if (titleMatch && titleMatch[1]) {
-          let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
-          if (rawTitle) packTitle = rawTitle;
-        }
+  try {
+    const htmlRes = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
       }
-    } catch (e) {}
-  }
+    });
+    if (htmlRes.ok) {
+      const htmlText = await htmlRes.text();
+      const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
+      if (titleMatch && titleMatch[1]) {
+        let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
+        if (rawTitle) packTitle = rawTitle;
+      }
+    }
+  } catch (e) {}
 
-  const stickersData = [];
-  for (let i = 0; i < meta.stickers.length; i++) {
-    const sticker = meta.stickers[i];
-    const candidateUrls = [
-      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/animation@2x.png?v=2`,
-      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/sticker@2x.png?v=2`,
-      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/ANDROID/sticker.png?v=2`
-    ];
+  const itemsData = [];
+  for (let i = 0; i < itemsList.length; i++) {
+    const item = itemsList[i];
+    
+    // Construct candidate URLs depending on shop type
+    let candidateUrls = [];
+    if (shopType === 'emojishop') {
+      candidateUrls = [
+        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png@2x.png?v=2`,
+        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png.png?v=2`,
+        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/ANDROID/png.png?v=2`
+      ];
+    } else {
+      candidateUrls = [
+        `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/animation@2x.png?v=2`,
+        `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/sticker@2x.png?v=2`,
+        `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/ANDROID/sticker.png?v=2`
+      ];
+    }
 
-    stickersData.push({
-      id: sticker.id,
+    itemsData.push({
+      id: item.id,
       candidateUrls
     });
   }
 
-  return { packTitle, stickersData };
+  return { packTitle, itemsData };
 }
 
-async function downloadSticker(item, destPath) {
+async function downloadItem(item, destPath) {
   for (const url of item.candidateUrls) {
     try {
       const res = await fetch(url, {
@@ -109,7 +123,7 @@ async function downloadSticker(item, destPath) {
       const arrayBuffer = await res.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       
-      if (buffer.length > 100) {
+      if (buffer.length > 50) {
         fs.writeFileSync(destPath, buffer);
         return true;
       }
@@ -125,18 +139,18 @@ async function downloadStickers(config = {}) {
     const { spinner, config: { dest } } = context;
 
     spinner.start();
-    const { packTitle, stickersData } = await scrapeStickerData(context);
+    const { packTitle, itemsData } = await scrapeStickerData(context);
     await makeDir(dest);
 
-    context.spinner.text = `Downloading ${stickersData.length} stickers for "${packTitle}"...`;
+    context.spinner.text = `Downloading ${itemsData.length} items for "${packTitle}"...`;
     
     let downloadedCount = 0;
-    for (let i = 0; i < stickersData.length; i++) {
-      const item = stickersData[i];
-      const pngDest = path.join(dest, `sticker-${i + 1}.png`);
-      const gifDest = path.join(dest, `sticker-${i + 1}.gif`);
+    for (let i = 0; i < itemsData.length; i++) {
+      const item = itemsData[i];
+      const pngDest = path.join(dest, `item-${i + 1}.png`);
+      const gifDest = path.join(dest, `item-${i + 1}.gif`);
       
-      const success = await downloadSticker(item, pngDest);
+      const success = await downloadItem(item, pngDest);
       if (success) {
         downloadedCount++;
         try {
@@ -144,11 +158,11 @@ async function downloadStickers(config = {}) {
         } catch (e) {}
       }
 
-      context.spinner.text = `Processed ${downloadedCount}/${stickersData.length} stickers...`;
+      context.spinner.text = `Processed ${downloadedCount}/${itemsData.length} items...`;
       await sleep(100); 
     }
 
-    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} PNGs & GIFs)`));
+    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} items)`));
     return { packTitle, count: downloadedCount };
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
@@ -163,20 +177,19 @@ app.post("/download", async (req, res) => {
 
   try {
     const { url } = req.body;
-    if (!url) return res.status(400).json({ error: "Missing LINE sticker URL" });
+    if (!url) return res.status(400).json({ error: "Missing LINE shop URL" });
 
-    const tempFolderId = `stickers-${Date.now()}`;
+    const tempFolderId = `pack-${Date.now()}`;
     const downloadPath = path.join(__dirname, "downloads", tempFolderId);
 
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
     
-    // Comprehensive filename sanitization for Windows/macOS/Linux
     const safeTitle = packTitle
-      .replace(/#/g, 'No.')           // Replace # with 'No.'
-      .replace(/[%^~\[\]]/g, '')     // Remove other risky characters
-      .replace(/[\/\\?%*:|"<>]/g, '') // Remove Windows forbidden symbols
-      .replace(/\s+/g, ' ')          // Collapse extra whitespace
-      .trim() || "line-stickers";
+      .replace(/#/g, 'No.')
+      .replace(/[%^~\[\]]/g, '')
+      .replace(/[\/\\?%*:|"<>]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim() || "line-pack";
       
     const zipFilename = `${safeTitle}.zip`;
 
