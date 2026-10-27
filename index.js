@@ -54,7 +54,7 @@ async function scrapeStickerData(context) {
     throw new Error("No stickers found in the product metadata.");
   }
 
-  // 2. Fetch the store HTML page to extract the official pack title
+  // 2. Fetch the store HTML page to extract the clean pack title
   let packTitle = `line-stickers-${productId}`;
   try {
     const htmlRes = await fetch(pageUrl, {
@@ -64,10 +64,10 @@ async function scrapeStickerData(context) {
     });
     if (htmlRes.ok) {
       const htmlText = await htmlRes.text();
-      // LINE store title is typically in <p class="mdCMN08Ttl"> or <div class="faq_title"> or similar headings, let's parse via regex
       const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
       if (titleMatch && titleMatch[1]) {
-        packTitle = titleMatch[1].replace("— VELUTINX", "").trim();
+        let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
+        if (rawTitle) packTitle = rawTitle;
       }
     }
   } catch (e) {
@@ -167,8 +167,14 @@ app.post("/download", async (req, res) => {
 
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
     
-    // Clean pack title for safe filesystem/zip filename use
-    const safeTitle = packTitle.replace(/[\/\\?%*:|"<>]/g, "").trim() || "line-stickers";
+    // Comprehensive filename sanitization for Windows/macOS/Linux
+    const safeTitle = packTitle
+      .replace(/#/g, 'No.')           // Replace # with 'No.'
+      .replace(/[%^~\[\]]/g, '')     // Remove other risky characters
+      .replace(/[\/\\?%*:|"<>]/g, '') // Remove Windows forbidden symbols
+      .replace(/\s+/g, ' ')          // Collapse extra whitespace
+      .trim() || "line-stickers";
+      
     const zipFilename = `${safeTitle}.zip`;
 
     const zipPath = path.join(__dirname, "downloads", `${tempFolderId}.zip`);
