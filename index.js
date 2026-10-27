@@ -10,12 +10,7 @@ const archiver = require("archiver");
 const chalk = require("chalk");
 const makeDir = require("make-dir");
 const ora = require("ora");
-
-const { execFile } = require("child_process");
-const util = require("util");
-const execFileAsync = util.promisify(execFile);
-
-const apng2gifBinPath = require("apng2gif-bin");
+const sharp = require("sharp"); // New: reliable APNG→GIF converter
 
 const app = express();
 app.use(cors());
@@ -50,12 +45,9 @@ async function scrapeStickerData(context) {
   let packTitle = `${shopType === "emojishop" ? "LINE Emojis" : "LINE Stickers"} ${productId}`;
   let itemsData = [];
 
-  // ---------- EMOJI PATH ----------
   if (shopType === "emojishop") {
     try {
-      const htmlRes = await fetch(pageUrl, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
+      const htmlRes = await fetch(pageUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (htmlRes.ok) {
         const htmlText = await htmlRes.text();
         const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
@@ -83,7 +75,6 @@ async function scrapeStickerData(context) {
     }
   }
 
-  // ---------- STICKER PATH ----------
   if (shopType === "stickershop" && itemsData.length === 0) {
     try {
       const htmlRes = await fetch(pageUrl, {
@@ -171,7 +162,7 @@ async function probeUrl(url) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. DOWNLOAD + CONVERSION
+// 2. DOWNLOAD + CONVERSION (now using Sharp)
 // ---------------------------------------------------------------------------
 
 async function downloadAndProcessItem(item, destDir, counters) {
@@ -193,28 +184,32 @@ async function downloadAndProcessItem(item, destDir, counters) {
       tempPath = path.join(destDir, `tmp-${uid}.bin`);
       fs.writeFileSync(tempPath, buffer);
 
-      // Simple and reliable APNG check: look for the acTL chunk
+      // Detect APNG by looking for the acTL chunk
       const isAnimated = buffer.includes(Buffer.from("acTL"));
 
       if (isAnimated) {
-        try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (_) {}
-
         const tempGif = path.join(destDir, `tmp-${uid}.gif`);
         try {
-          await execFileAsync(apng2gifBinPath, [tempPath, tempGif]);
+          // Sharp reads APNG as animated and outputs an animated GIF
+          await sharp(buffer, { animated: true })
+            .gif()
+            .toFile(tempGif);
+
+          const stats = fs.statSync(tempGif);
+          if (stats.size < 100) throw new Error(`Output GIF too small (${stats.size} bytes)`);
+
           counters.gif += 1;
           const finalGif = path.join(destDir, `sticker-${counters.gif}.gif`);
           fs.renameSync(tempGif, finalGif);
           fs.unlinkSync(tempPath);
           return { success: true, type: "gif" };
         } catch (convErr) {
-          console.error(`[Convert Failed]:`, convErr.message);
+          console.error(`[Convert Failed]: ${url}`, convErr.message);
           try { fs.unlinkSync(tempGif); } catch (_) {}
-          // Fall through to PNG handling below
+          // Fall through to save as PNG
         }
       }
 
-      // Static image, or conversion failed → save as PNG
       counters.png += 1;
       const finalPng = path.join(destDir, `sticker-${counters.png}.png`);
       fs.renameSync(tempPath, finalPng);
