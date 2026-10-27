@@ -1,98 +1,299 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>LINE Sticker Downloader</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; }
-    .row { margin-bottom: 12px; }
-    label { display: block; margin-bottom: 4px; font-weight: 600; }
-    input[type="text"], input[type="number"] { width: 100%; padding: 8px; box-sizing: border-box; }
-    button { padding: 10px 16px; font-size: 15px; cursor: pointer; }
-    #status { margin-top: 16px; white-space: pre-wrap; }
-    .error { color: #b00020; }
-  </style>
-</head>
-<body>
-  <h1>LINE Sticker Downloader</h1>
-
-  <div class="row">
-    <label for="url">Sticker pack URL</label>
-    <input type="text" id="url"
-           placeholder="https://store.line.me/stickershop/product/37295/en">
-  </div>
-
-  <div class="row">
-    <label for="delay">Animated wait delay (ms)</label>
-    <input type="number" id="delay" value="1000" min="0">
-  </div>
-
-  <div class="row">
-    <label>
-      <input type="checkbox" id="gif"> Convert animated stickers to GIF
-    </label>
-  </div>
-
-  <div class="row">
-    <button id="downloadBtn">Download Stickers</button>
-  </div>
-
-  <div id="status"></div>
-
-  <script>
-    const button = document.getElementById('downloadBtn');
-    const statusDiv = document.getElementById('status');
-
-    button.addEventListener('click', async () => {
-      const url = document.getElementById('url').value.trim();
-      const convertToGif = document.getElementById('gif').checked;
-      const animatedWaitDelay = parseInt(document.getElementById('delay').value, 10) || 0;
-
-      if (!url) {
-        statusDiv.textContent = 'Please enter a LINE sticker URL';
-        statusDiv.className = 'error';
-        return;
-      }
-
-      statusDiv.className = '';
-      statusDiv.textContent = 'Downloading... this can take a while.';
-      button.disabled = true;
-
-      try {
-        // Use a relative URL so this works regardless of origin
-        const response = await fetch('/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, convertToGif, animatedWaitDelay })
-        });
-
-        if (!response.ok) {
-          let msg = 'Server error: ' + response.status;
-          try {
-            const j = await response.json();
-            if (j && j.error) msg = j.error;
-          } catch (_) {}
-          throw new Error(msg);
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LINE Sticker Downloader — VELUTINX</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #d3d0c1;
+            --panel: #e3e0d4;
+            --text: #3a3528;
+            --muted: #716b5b;
+            --accent: #aa9e76;
+            --border: #b9b29b;
+            --hover: #c7bea0;
+            --shadow: rgba(58, 53, 40, .10);
+            --success: #536447;
+            --danger: #8b3933;
         }
 
-        const blob = await response.blob();
-        const downloadUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = 'line-stickers.zip';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(downloadUrl);
+        * { box-sizing: border-box; }
 
-        statusDiv.textContent = 'Download complete';
-      } catch (err) {
-        statusDiv.textContent = 'Error: ' + err.message;
-        statusDiv.className = 'error';
-      } finally {
-        button.disabled = false;
-      }
-    });
-  </script>
+        body {
+            margin: 0;
+            min-height: 100vh;
+            padding: 36px 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        .app { width: min(100%, 640px); }
+
+        header { text-align: center; margin-bottom: 28px; }
+
+        .eyebrow {
+            margin: 0 0 10px;
+            font-size: .72rem;
+            font-weight: 800;
+            letter-spacing: .22em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(2rem, 6vw, 3rem);
+            letter-spacing: -.045em;
+            line-height: 1.05;
+        }
+
+        .subtitle {
+            max-width: 500px;
+            margin: 13px auto 0;
+            color: var(--muted);
+            font-size: .98rem;
+            line-height: 1.6;
+        }
+
+        .panel {
+            padding: clamp(20px, 4vw, 30px);
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: 0 12px 35px var(--shadow);
+        }
+
+        .field { margin-bottom: 18px; }
+        .field:last-of-type { margin-bottom: 0; }
+
+        label {
+            display: block;
+            margin-bottom: 7px;
+            font-size: .82rem;
+            font-weight: 800;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+            color: var(--text);
+        }
+
+        input[type="text"],
+        input[type="number"] {
+            width: 100%;
+            padding: 12px 14px;
+            font: inherit;
+            font-size: .95rem;
+            color: var(--text);
+            background: rgba(255,255,255,.35);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            outline: none;
+            transition: border-color .2s, background .2s;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus {
+            border-color: var(--accent);
+            background: rgba(255,255,255,.55);
+        }
+
+        .hint {
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: .78rem;
+            line-height: 1.5;
+        }
+
+        .note-banner {
+            margin: 20px 0;
+            padding: 12px 14px;
+            font-size: .82rem;
+            line-height: 1.55;
+            color: var(--text);
+            background: rgba(170,158,118,.16);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .note-banner strong { color: var(--text); }
+
+        .primary-button {
+            appearance: none;
+            border: 0;
+            cursor: pointer;
+            font: inherit;
+            font-weight: 750;
+            width: 100%;
+            min-height: 48px;
+            margin-top: 20px;
+            padding: 14px 18px;
+            font-size: .95rem;
+            color: #fffdf7;
+            background: var(--text);
+            border-radius: 999px;
+            transition: filter .2s, transform .2s;
+        }
+
+        .primary-button:hover:not(:disabled) { filter: brightness(1.12); }
+        .primary-button:active:not(:disabled) { transform: translateY(1px); }
+        .primary-button:disabled { opacity: .55; cursor: not-allowed; }
+
+        #status {
+            margin-top: 16px;
+            padding: 0 4px;
+            font-size: .85rem;
+            line-height: 1.55;
+            color: var(--muted);
+            text-align: center;
+            white-space: pre-wrap;
+        }
+        #status.error { color: var(--danger); }
+        #status.success { color: var(--success); }
+
+        .toast {
+            position: fixed;
+            left: 50%;
+            bottom: 20px;
+            z-index: 10;
+            max-width: calc(100% - 32px);
+            padding: 12px 18px;
+            border-radius: 999px;
+            background: var(--text);
+            color: #fffdf7;
+            font-size: .88rem;
+            box-shadow: 0 8px 25px var(--shadow);
+            transform: translate(-50%, 15px);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .2s, transform .2s;
+        }
+        .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+        .footer-note {
+            margin: 18px 3px 0;
+            color: var(--muted);
+            font-size: .78rem;
+            line-height: 1.6;
+            text-align: center;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { transition: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <main class="app">
+        <header>
+            <p class="eyebrow">VELUTINX · Utilities</p>
+            <h1>LINE Sticker Downloader</h1>
+            <p class="subtitle">Paste a pack URL from the LINE store and get every sticker in a single zip — PNG files, plus GIFs for animated packs.</p>
+        </header>
+
+        <section class="panel" aria-label="LINE sticker downloader">
+            <div class="field">
+                <label for="url">Sticker pack URL</label>
+                <input type="text" id="url"
+                       placeholder="https://store.line.me/stickershop/product/37295/en"
+                       autocomplete="off" spellcheck="false">
+                <p class="hint">Find a pack at store.line.me and copy its URL.</p>
+            </div>
+
+            <div class="field">
+                <label for="delay">Animated wait delay (ms)</label>
+                <input type="number" id="delay" value="1000" min="0">
+                <p class="hint">How long to wait after clicking each sticker to detect animated versions. Raise it if GIFs are missing.</p>
+            </div>
+
+            <div class="note-banner">
+                <strong>Heads-up:</strong> for animated packs, both the original PNGs and the converted GIFs are included in the zip. After extracting, keep whichever set you need and delete the other.
+            </div>
+
+            <button class="primary-button" id="downloadBtn" type="button">Download Stickers</button>
+
+            <div id="status" aria-live="polite"></div>
+        </section>
+
+        <p class="footer-note">Downloads are generated server-side with a headless browser. First request after a period of inactivity may take 30–60 s to warm up.</p>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script>
+        (() => {
+            const button = document.getElementById('downloadBtn');
+            const statusDiv = document.getElementById('status');
+            const toast = document.getElementById('toast');
+            let toastTimer;
+
+            function showToast(message) {
+                toast.textContent = message;
+                toast.classList.add('show');
+                clearTimeout(toastTimer);
+                toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+            }
+
+            function setStatus(message, kind) {
+                statusDiv.textContent = message;
+                statusDiv.className = kind || '';
+            }
+
+            button.addEventListener('click', async () => {
+                const url = document.getElementById('url').value.trim();
+                const animatedWaitDelay = parseInt(document.getElementById('delay').value, 10) || 0;
+
+                if (!url) {
+                    setStatus('Please enter a LINE sticker URL.', 'error');
+                    return;
+                }
+
+                setStatus('Downloading… this can take a while.');
+                button.disabled = true;
+
+                try {
+                    const response = await fetch('/download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            url,
+                            animatedWaitDelay,
+                            convertToGif: true
+                        })
+                    });
+
+                    if (!response.ok) {
+                        let msg = 'Server error: ' + response.status;
+                        try {
+                            const j = await response.json();
+                            if (j && j.error) msg = j.error;
+                        } catch (_) {}
+                        throw new Error(msg);
+                    }
+
+                    const blob = await response.blob();
+                    const downloadUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = downloadUrl;
+                    a.download = 'line-stickers.zip';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(downloadUrl);
+
+                    setStatus('Download complete — the zip contains PNGs and, for animated packs, GIFs too.', 'success');
+                    showToast('Sticker pack downloaded');
+                } catch (err) {
+                    setStatus('Error: ' + err.message, 'error');
+                } finally {
+                    button.disabled = false;
+                }
+            });
+        })();
+    </script>
 </body>
 </html>
