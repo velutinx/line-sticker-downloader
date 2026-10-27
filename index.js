@@ -29,7 +29,6 @@ function createContext(config) {
 async function scrapeStickerData(context) {
   const { url: pageUrl } = context.config;
 
-  // Support both /stickershop/product/ and /emojishop/product/ (supports numeric or alphanumeric IDs)
   const match = pageUrl.match(/\/(stickershop|emojishop)\/product\/([a-zA-Z0-9]+)/);
   if (!match) {
     throw new Error("Could not extract product type or ID from the provided URL.");
@@ -38,28 +37,40 @@ async function scrapeStickerData(context) {
   const shopType = match[1]; // 'stickershop' or 'emojishop'
   const productId = match[2];
 
-  // 1. Fetch metadata JSON based on whether it's stickers or emoji
-  const metaUrl = `https://stickershop.line-scdn.net/${shopType}/v1/product/${productId}/iphone/productInfo.meta`;
-  const metaRes = await fetch(metaUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Referer": "https://store.line.me/"
-    }
-  });
+  // Try multiple common metadata endpoints for emojis/stickers
+  const metaUrls = shopType === 'emojishop' ? [
+    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/PC/productInfo.meta`,
+    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/iphone/productInfo.meta`
+  ] : [
+    `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`,
+    `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/PC/productInfo.meta`
+  ];
 
-  if (!metaRes.ok) {
-    throw new Error(`Failed to fetch metadata: HTTP ${metaRes.status}`);
+  let meta = null;
+  let metaRes = null;
+
+  for (const metaUrl of metaUrls) {
+    metaRes = await fetch(metaUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://store.line.me/"
+      }
+    });
+    if (metaRes.ok) {
+      meta = await metaRes.json();
+      break;
+    }
   }
 
-  const meta = await metaRes.json();
+  if (!meta) {
+    throw new Error(`Failed to fetch metadata: HTTP ${metaRes ? metaRes.status : 404}`);
+  }
 
-  // Emojis use meta.emoji instead of meta.stickers
   const itemsList = meta.stickers || meta.emojis;
   if (!itemsList || !Array.isArray(itemsList) || itemsList.length === 0) {
     throw new Error("No items found in the product metadata.");
   }
 
-  // 2. Extract pack title
   let packTitle = meta.title?.en || meta.packageTitle?.en || `${shopType === 'emojishop' ? 'LINE Emojis' : 'LINE Stickers'} ${productId}`;
   
   try {
@@ -74,7 +85,7 @@ async function scrapeStickerData(context) {
       const htmlText = await htmlRes.text();
       const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
       if (titleMatch && titleMatch[1]) {
-        let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
+        let rawTitle = titleMatch[1].split('—')[0].split('|')[0].split('–')[0].trim();
         if (rawTitle) packTitle = rawTitle;
       }
     }
@@ -84,13 +95,13 @@ async function scrapeStickerData(context) {
   for (let i = 0; i < itemsList.length; i++) {
     const item = itemsList[i];
     
-    // Construct candidate URLs depending on shop type
     let candidateUrls = [];
     if (shopType === 'emojishop') {
       candidateUrls = [
         `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png@2x.png?v=2`,
         `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png.png?v=2`,
-        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/ANDROID/png.png?v=2`
+        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/ANDROID/png.png?v=2`,
+        `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/PC/png.png?v=2`
       ];
     } else {
       candidateUrls = [
@@ -184,7 +195,10 @@ app.post("/download", async (req, res) => {
 
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
     
-    const safeTitle = packTitle
+    // Clean and split title at separators (—, |, –) to remove trailing website text
+    const cleanTitle = packTitle.split('—')[0].split('|')[0].split('–')[0].trim();
+    
+    const safeTitle = cleanTitle
       .replace(/#/g, 'No.')
       .replace(/[%^~\[\]]/g, '')
       .replace(/[\/\\?%*:|"<>]/g, '')
