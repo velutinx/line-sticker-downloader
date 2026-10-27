@@ -236,18 +236,19 @@ app.post("/download", async (req, res) => {
       },
     });
 
-    archive.pipe(output);
-
-    archive.directory(downloadPath, false);
-
-    await archive.finalize();
-
+    // Attach listeners BEFORE finalize, otherwise the "close"
+    // event can fire before our handler is registered and the
+    // response never gets sent (browser hangs forever).
     output.on("close", () => {
 
       res.download(
         zipPath,
         `${folderName}.zip`,
-        () => {
+        (err) => {
+
+          if (err) {
+            console.error("send error:", err);
+          }
 
           fs.rmSync(downloadPath, {
             recursive: true,
@@ -260,15 +261,51 @@ app.post("/download", async (req, res) => {
 
         }
       );
+
     });
+
+    output.on("error", (err) => {
+
+      console.error("output stream error:", err);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: err.message,
+        });
+      }
+
+    });
+
+    archive.on("error", (err) => {
+
+      console.error("archive error:", err);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: err.message,
+        });
+      }
+
+    });
+
+    archive.pipe(output);
+
+    archive.directory(downloadPath, false);
+
+    // Do not await: finalize's promise resolves before the
+    // underlying stream emits "close". Errors are handled via
+    // archive.on("error") above.
+    archive.finalize();
 
   } catch (err) {
 
     console.error(err);
 
-    res.status(500).json({
-      error: err.message,
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: err.message,
+      });
+    }
 
   }
 
