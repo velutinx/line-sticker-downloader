@@ -122,8 +122,8 @@ async function scrapeStickerUrls(context) {
       url = await page.evaluate(
         (el) =>
           el.style.backgroundImage.replace(
-            /^url\\(\"|\"\\)$/g,
-            ""
+            /url\((['"]?)(.*?)\1\)/gi, // Correctly extracts the URL
+            "$2"
           ),
         elementHandle
       );
