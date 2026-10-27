@@ -8,7 +8,6 @@ const cors = require("cors");
 const archiver = require("archiver");
 
 const chalk = require("chalk");
-const puppeteer = require("puppeteer");
 const makeDir = require("make-dir");
 const downloadImage = require("image-downloader").image;
 const ora = require("ora");
@@ -18,7 +17,6 @@ const util = require("util");
 const execFileAsync = util.promisify(execFile);
 
 const apng2gifBinPath = require("apng2gif-bin");
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const app = express();
 app.use(cors());
@@ -29,109 +27,65 @@ function createContext(config) {
   const {
     url,
     dest = "stickers",
-    animatedWaitDelay = 3000,
     convertToGif = false,
   } = config;
 
   return {
-    spinner: ora("Downloading stickers..."),
-    config: { url, dest, animatedWaitDelay, convertToGif },
+    spinner: ora("Fetching sticker data..."),
+    config: { url, dest, convertToGif },
   };
 }
 
 async function scrapeStickerUrls(context) {
-  const { url: pageUrl, animatedWaitDelay } = context.config;
+  const { url: pageUrl } = context.config;
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote",
-      "--disable-accelerated-2d-canvas",
-      "--disable-web-security",
-    ],
+  // Extract the product ID from the URL (e.g., https://store.line.me/stickershop/product/37295/en)
+  const productIdMatch = pageUrl.match(/\/product\/(\d+)/);
+  if (!productIdMatch) {
+    throw new Error("Could not extract product ID from the provided URL.");
+  }
+  const productId = productIdMatch[1];
+
+  // Fetch the JSON metadata directly from LINE's CDN
+  const metaUrl = `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`;
+  
+  const res = await fetch(metaUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "application/json"
+    }
   });
 
-  const page = await browser.newPage();
-  await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
-
-  try {
-    await page.waitForSelector('ul > li [style^="background-image"]', { timeout: 90000 });
-  } catch (e) {
-    console.log("Timed out waiting for stickers to render.");
+  if (!res.ok) {
+    throw new Error(`Failed to fetch sticker metadata (HTTP ${res.status}). Check the URL.`);
   }
 
-  const elementHandles = await page.$$('ul > li [style^="background-image"]');
-  if (elementHandles.length === 0) {
-    throw new Error("Could not find any stickers on the specified page");
+  const meta = await res.json();
+  
+  if (!meta.stickers || meta.stickers.length === 0) {
+    throw new Error("No stickers found in the product metadata.");
   }
 
-  const stickerUrls = [];
-  let index = 0;
-  const total = elementHandles.length;
+  const urls = [];
+  let animatedCount = 0;
 
-  for (const elementHandle of elementHandles) {
-    index++;
-    context.spinner.text = `Scraping stickers (${index}/${total})...`;
-
-    // 1. 点击贴纸
-    await elementHandle.evaluate((node) => node.click());
-    await sleep(animatedWaitDelay); // 等待动画加载
-
-    // 2. 尝试获取动态 APNG 的 URL
-    let url = await page.evaluate(() => {
-      // 寻找所有带有 data-apng-src 的 canvas 元素
-      const canvases = document.querySelectorAll("canvas[data-apng-src]");
-      // 如果存在，取最后一个（最新打开的）元素的属性
-      if (canvases.length > 0) {
-        return canvases[canvases.length - 1].getAttribute("data-apng-src");
-      }
-      return null;
-    });
-
-    // 3. 如果没有找到动态 URL，则退回到获取静态背景图
-    let isAnimated = false;
-    if (url) {
-      isAnimated = true;
-    } else {
-      url = await page.evaluate(
-        (el) => el.style.backgroundImage.replace(/url\((['"]?)(.*?)\1\)/gi, "$2"),
-        elementHandle
-      );
+  for (let i = 0; i < meta.stickers.length; i++) {
+    const sticker = meta.stickers[i];
+    let suffix = "sticker@2x.png";
+    
+    // Check if the sticker is animated or has sound (which are APNGs)
+    if (sticker.stickerType === "ANIMATION" || sticker.stickerType === "SOUND") {
+      suffix = "animation@2x.png";
+      animatedCount++;
     }
 
-    console.log(`Sticker ${index}/${total}: Found ${isAnimated ? 'ANIMATED' : 'STATIC'} URL: ${url}`);
-    stickerUrls.push(url);
-
-    // 4. 关键步骤：关闭弹窗，为下一个贴纸做准备
-    await page.evaluate(() => {
-      // 常见的关闭按钮选择器，尝试多种可能性
-      const closeSelectors = [
-        '.mdLYCloseButton',          // LINE 商店常见的关闭按钮 class
-        'button[aria-label="Close"]',
-        '.stickerPreviewModal .close',
-        '.modal-header button',
-      ];
-      for (const selector of closeSelectors) {
-        const btn = document.querySelector(selector);
-        if (btn) {
-          btn.click();
-          return;
-        }
-      }
-      // 如果找不到关闭按钮，尝试点击遮罩层
-      const overlay = document.querySelector('.mdLYOverlay, .modal-backdrop');
-      if (overlay) overlay.click();
-    });
-    await sleep(500); // 给弹窗关闭一点时间
+    const stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/${suffix}`;
+    urls.push(stickerUrl);
+    
+    context.spinner.text = `Found ${urls.length}/${meta.stickers.length} stickers (${animatedCount} animated)...`;
   }
 
-  await browser.close();
-  return stickerUrls;
+  return urls;
 }
 
 async function downloadStickers(config = {}) {
@@ -141,11 +95,9 @@ async function downloadStickers(config = {}) {
     const { spinner, config: { dest, convertToGif } } = context;
 
     spinner.start();
-    let urls = await scrapeStickerUrls(context);
-    urls = Array.from(new Set(urls)); // 去重
-
-    if (urls.length === 0) throw new Error("No sticker URLs were found.");
-
+    
+    const urls = await scrapeStickerUrls(context);
+    
     await makeDir(dest);
     context.spinner.text = `Downloading ${urls.length} stickers...`;
 
@@ -173,7 +125,9 @@ async function downloadStickers(config = {}) {
             await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
             console.log(`[apng2gif] Success: ${pngPath} -> ${gifPath}`);
           } catch (err) {
-            console.error(`[apng2gif] Failed: ${pngPath}:`, err.message);
+            // Static PNGs might fail to convert to GIF, which is normal. 
+            // We log it but don't crash the whole process.
+            console.error(`[apng2gif] Notice: ${pngPath} is likely static.`, err.message);
           }
         })
       );
@@ -190,13 +144,13 @@ async function downloadStickers(config = {}) {
 
 app.post("/download", async (req, res) => {
   try {
-    const { url, convertToGif = false, animatedWaitDelay = 3000 } = req.body;
+    const { url, convertToGif = false } = req.body;
     if (!url) return res.status(400).json({ error: "Missing LINE sticker URL" });
 
     const folderName = `stickers-${Date.now()}`;
     const downloadPath = path.join(__dirname, "downloads", folderName);
 
-    await downloadStickers({ url, dest: downloadPath, convertToGif, animatedWaitDelay });
+    await downloadStickers({ url, dest: downloadPath, convertToGif });
 
     const zipPath = `${downloadPath}.zip`;
     const output = fs.createWriteStream(zipPath);
