@@ -90,8 +90,9 @@ async function downloadStickers(config = {}) {
     let packTitle = await getPackTitle(pageUrl) || `LINE Pack ${productId}`;
     await makeDir(dest);
     
-    const counters = { gif: 0, png: 0 };
     let downloadedCount = 0;
+    let gifCount = 0;
+    let pngCount = 0;
 
     if (shopType === "emojishop") {
       // --- EMOJI PATH ---
@@ -115,15 +116,15 @@ async function downloadStickers(config = {}) {
               try {
                 const image = await apng.sharpFromApng(buffer);
                 const gifBuffer = await image.gif().toBuffer();
-                counters.gif++;
-                fs.writeFileSync(path.join(dest, `sticker-${counters.gif}.gif`), gifBuffer);
+                fs.writeFileSync(path.join(dest, `sticker-${i + 1}.gif`), gifBuffer);
+                gifCount++;
               } catch (e) {
-                counters.png++;
-                fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+                fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
+                pngCount++;
               }
             } else {
-              counters.png++;
-              fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+              fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
+              pngCount++;
             }
             downloadedCount++;
             break; // Move to next item
@@ -160,10 +161,17 @@ async function downloadStickers(config = {}) {
       spinner.text = `Extracting and processing ZIP...`;
       const zip = new AdmZip(zipBuffer);
       
-      // Filter out key images and system files
+      // Filter out key images and system files, then SORT numerically
       const validEntries = zip.getEntries().filter(e => {
         const n = e.entryName;
         return n.endsWith('.png') && !n.includes('_key@2x') && !n.startsWith('tab_');
+      }).sort((a, b) => {
+        // Extract the numeric ID from the filename (e.g., "123456@2x.png" -> 123456)
+        const getNum = (name) => {
+           const m = name.match(/^(\d+)/);
+           return m ? parseInt(m[1], 10) : 0;
+        };
+        return getNum(a.entryName) - getNum(b.entryName);
       });
 
       if (validEntries.length === 0) throw new Error("The ZIP did not contain any valid sticker images.");
@@ -177,25 +185,25 @@ async function downloadStickers(config = {}) {
           try {
             const image = await apng.sharpFromApng(buffer);
             const gifBuffer = await image.gif().toBuffer();
-            counters.gif++;
-            fs.writeFileSync(path.join(dest, `sticker-${counters.gif}.gif`), gifBuffer);
+            fs.writeFileSync(path.join(dest, `sticker-${i + 1}.gif`), gifBuffer);
+            gifCount++;
             downloadedCount++;
           } catch (e) {
             console.error(`[Convert Failed] ${entry.entryName}:`, e.message);
-            counters.png++;
-            fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+            fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
+            pngCount++;
             downloadedCount++;
           }
         } else {
-          counters.png++;
-          fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+          fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
+          pngCount++;
           downloadedCount++;
         }
         spinner.text = `Processed ${i + 1}/${validEntries.length}...`;
       }
     }
 
-    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} items: ${counters.gif} GIF, ${counters.png} PNG)`));
+    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} items: ${gifCount} GIF, ${pngCount} PNG)`));
     return { packTitle, count: downloadedCount };
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
