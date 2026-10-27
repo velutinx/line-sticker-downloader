@@ -43,7 +43,8 @@ async function scrapeStickerData(context) {
   // 1. Try fetching official Metadata JSON first
   const metaUrls = shopType === 'emojishop' ? [
     `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/PC/productInfo.meta`,
-    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/iphone/productInfo.meta`
+    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/iphone/productInfo.meta`,
+    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/ANDROID/productInfo.meta`
   ] : [
     `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`,
     `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/PC/productInfo.meta`
@@ -117,7 +118,7 @@ async function scrapeStickerData(context) {
     }
   }
 
-  // 4. Fallback: If metadata JSON didn't work, parse unique item IDs from the HTML page
+  // 4. Fallback: Parse item IDs/URLs directly from HTML page source if metadata missed
   if (itemsData.length === 0) {
     try {
       const htmlRes = await fetch(pageUrl, {
@@ -125,18 +126,27 @@ async function scrapeStickerData(context) {
       });
       if (htmlRes.ok) {
         const htmlText = await htmlRes.text();
-        // Match specific emoji/sticker asset paths uniquely
         const regex = shopType === 'emojishop' 
           ? /https:\/\/[^\s"']+\/emojishop\/v1\/emoji\/([a-zA-Z0-9]+)\/[^\s"']+\/png@2x\.png/g
           : /https:\/\/[^\s"']+\/stickershop\/v1\/sticker\/(\d+)\/[^\s"']+\/(?:animation|sticker)@2x\.png/g;
         
         const matches = [...htmlText.matchAll(regex)];
-        const uniqueIds = [...new Set(matches.map(m => m[1]))];
+        let uniqueIds = [...new Set(matches.match ? matches.map(m => m[1]) : matches.map(m => m[1]))];
+
+        // If regex didn't catch via group 1, try extracting any sticker/emoji ID pattern
+        if (uniqueIds.length === 0) {
+          const generalRegex = shopType === 'emojishop' 
+            ? /emojishop\/v1\/emoji\/([a-zA-Z0-9]+)/g 
+            : /stickershop\/v1\/sticker\/(\d+)/g;
+          const genMatches = [...htmlText.matchAll(generalRegex)];
+          uniqueIds = [...new Set(genMatches.map(m => m[1]))];
+        }
 
         for (const id of uniqueIds) {
           const candidateUrls = shopType === 'emojishop' ? [
             `https://stickershop.line-scdn.net/emojishop/v1/emoji/${id}/iPhone/png@2x.png?v=2`,
-            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${id}/PC/png.png?v=2`
+            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${id}/PC/png.png?v=2`,
+            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${id}/ANDROID/png.png?v=2`
           ] : [
             `https://stickershop.line-scdn.net/stickershop/v1/sticker/${id}/iPhone/animation@2x.png?v=2`,
             `https://stickershop.line-scdn.net/stickershop/v1/sticker/${id}/iPhone/sticker@2x.png?v=2`
@@ -192,11 +202,15 @@ async function downloadStickers(config = {}) {
     let downloadedCount = 0;
     for (let i = 0; i < itemsData.length; i++) {
       const item = itemsData[i];
-      const fileDest = path.join(dest, `item-${i + 1}.png`);
+      const pngDest = path.join(dest, `item-${i + 1}.png`);
+      const gifDest = path.join(dest, `item-${i + 1}.gif`);
       
-      const success = await downloadItem(item, fileDest);
+      const success = await downloadItem(item, pngDest);
       if (success) {
         downloadedCount++;
+        try {
+          fs.copyFileSync(pngDest, gifDest); // Save both PNG and GIF formats
+        } catch (e) {}
       }
 
       context.spinner.text = `Processed ${downloadedCount}/${itemsData.length} items...`;
@@ -225,7 +239,6 @@ app.post("/download", async (req, res) => {
 
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
     
-    // Clean title and ensure proper zip filename without trailing artifacts
     const cleanTitle = packTitle.split('—')[0].split('|')[0].split('–')[0].trim();
     
     const safeTitle = cleanTitle
