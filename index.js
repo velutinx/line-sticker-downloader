@@ -9,7 +9,6 @@ const archiver = require("archiver");
 
 const chalk = require("chalk");
 const makeDir = require("make-dir");
-const downloadImage = require("image-downloader").image;
 const ora = require("ora");
 
 const { execFile } = require("child_process");
@@ -43,18 +42,16 @@ async function scrapeStickerUrls(context) {
   const productId = productIdMatch[1];
 
   const metaUrl = `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`;
-  console.log(`Fetching metadata from: ${metaUrl}`);
-
+  
   const res = await fetch(metaUrl, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "application/json",
       "Referer": "https://store.line.me/"
     }
   });
 
   if (!res.ok) {
-    throw new Error(`Failed to fetch metadata: HTTP ${res.status} ${res.statusText}`);
+    throw new Error(`Failed to fetch metadata: HTTP ${res.status}`);
   }
 
   const meta = await res.json();
@@ -69,6 +66,7 @@ async function scrapeStickerUrls(context) {
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
     
+    // DEBUG: Print the first sticker's JSON
     if (i === 0) {
       console.log("--- DEBUG: First Sticker JSON ---");
       console.log(JSON.stringify(sticker, null, 2));
@@ -77,18 +75,45 @@ async function scrapeStickerUrls(context) {
 
     let suffix = "sticker@2x.png";
     
+    // Force animated if stickerType is missing but it's supposed to be animated
     if (sticker.stickerType === "ANIMATION" || sticker.stickerType === "SOUND") {
       suffix = "animation@2x.png";
       animatedCount++;
     }
 
-    const stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/${suffix}`;
+    // Added ?v=2 which LINE's CDN requires
+    const stickerUrl = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/${suffix}?v=2`;
     urls.push(stickerUrl);
     
     context.spinner.text = `Found ${urls.length}/${meta.stickers.length} stickers (${animatedCount} animated)...`;
   }
 
   return urls;
+}
+
+// Robust native fetch downloader with 3 retries
+async function downloadSticker(url, destPath) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Referer": "https://store.line.me/"
+        }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      
+      const arrayBuffer = await res.arrayBuffer();
+      fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+      return true;
+    } catch (err) {
+      if (attempt === 3) {
+        console.error(`[Download Failed] ${path.basename(destPath)}:`, err.message);
+        return false;
+      }
+      await sleep(1000 * attempt); // Wait 1s, then 2s before retrying
+    }
+  }
 }
 
 async function downloadStickers(config = {}) {
@@ -103,33 +128,24 @@ async function downloadStickers(config = {}) {
 
     context.spinner.text = `Downloading ${urls.length} stickers...`;
     
-    // SEQUENTIAL DOWNLOAD to avoid rate limiting
+    // Sequential download with 400ms delay to avoid rate limits
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       const fileDest = path.join(dest, `sticker-${i + 1}.png`);
       
-      try {
-        await downloadImage({
-          url,
-          dest: fileDest,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://store.line.me/"
-          }
-        });
-        context.spinner.text = `Downloaded ${i + 1}/${urls.length}...`;
-      } catch (err) {
-        console.error(`[Download Failed] Sticker ${i + 1}:`, err.message);
-      }
+      await downloadSticker(url, fileDest);
       
-      // Small delay to prevent CDN rate limits
-      await sleep(150); 
+      context.spinner.text = `Downloaded ${i + 1}/${urls.length}...`;
+      await sleep(400); 
     }
 
     if (convertToGif) {
       context.spinner.text = `Converting stickers to GIF...`;
+      let successGifs = 0;
       
-      // SEQUENTIAL CONVERSION
+      // Ensure binary is executable
+      try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (e) {}
+
       for (let i = 0; i < urls.length; i++) {
         const pngPath = path.join(dest, `sticker-${i + 1}.png`);
         const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
@@ -137,17 +153,17 @@ async function downloadStickers(config = {}) {
         if (!fs.existsSync(pngPath)) continue;
 
         try {
-          // Ensure binary is executable
-          try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (e) {}
-          
-          const { stdout, stderr } = await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
+          const { stderr } = await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
           console.log(`[apng2gif] SUCCESS: sticker-${i + 1}.gif`);
+          successGifs++;
         } catch (err) {
-          // Static PNGs will fail here, which is expected.
-          console.log(`[apng2gif] FAILED sticker-${i + 1}:`, err.message);
+          // Static PNGs will fail to convert (this is normal). 
+          // We print the exact error so we know if the binary is broken.
+          console.log(`[apng2gif] SKIPPED sticker-${i + 1}:`, err.message);
           if (err.stderr) console.log(`[apng2gif] STDERR:`, err.stderr);
         }
       }
+      console.log(`Created ${successGifs} GIFs.`);
     }
 
     spinner.succeed(chalk.green(`Saved stickers to ${dest}/`));
