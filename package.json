@@ -29,7 +29,8 @@
     "save"
   ],
   "dependencies": {
-    "@fiahfy/apng2gif": "^0.0.10",
+    "sharp": "^0.33.5",
+    "sharp-apng": "^0.1.5",
     "archiver": "^7.0.1",
     "chalk": "2.4.1",
     "cors": "^2.8.5",
