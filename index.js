@@ -40,33 +40,7 @@ async function scrapeStickerData(context) {
   let packTitle = `${shopType === 'emojishop' ? 'LINE Emojis' : 'LINE Stickers'} ${productId}`;
   let itemsData = [];
 
-  // 1. Attempt fetching metadata JSON first
-  const metaUrls = shopType === 'emojishop' ? [
-    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/ANDROID/productInfo.meta`,
-    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/PC/productInfo.meta`,
-    `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/iphone/productInfo.meta`
-  ] : [
-    `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`,
-    `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/PC/productInfo.meta`
-  ];
-
-  let meta = null;
-  for (const metaUrl of metaUrls) {
-    try {
-      const res = await fetch(metaUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Referer": "https://store.line.me/"
-        }
-      });
-      if (res.ok) {
-        meta = await res.json();
-        break;
-      }
-    } catch (e) {}
-  }
-
-  // 2. Extract title from HTML page
+  // 1. Fetch the store HTML page first to parse title and embedded asset URLs
   try {
     const htmlRes = await fetch(pageUrl, {
       headers: {
@@ -77,56 +51,87 @@ async function scrapeStickerData(context) {
     });
     if (htmlRes.ok) {
       const htmlText = await htmlRes.text();
+      
+      // Extract title
       const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
       if (titleMatch && titleMatch[1]) {
         let rawTitle = titleMatch[1].split('—')[0].split('|')[0].split('–')[0].trim();
         if (rawTitle) packTitle = rawTitle;
       }
 
-      // Fallback: If metadata JSON failed, scrape direct image URLs out of the HTML page!
-      if (!meta || (!meta.stickers && !meta.emojis)) {
-        const imageUrlMatches = htmlText.matchAll(/https:\/\/[^\s"']+\/(?:sticker|emoji)\/[^\s"']+\.(?:png|gif)/g);
-        const uniqueUrls = [...new Set([...imageUrlMatches].map(m => m[0]))];
-        if (uniqueUrls.length > 0) {
-          itemsData = uniqueUrls.map((u, idx) => ({
-            id: idx + 1,
-            candidateUrls: [u]
-          }));
-        }
+      // Extract all sticker/emoji CDN image URLs directly from the HTML source code
+      const imageUrlMatches = htmlText.matchAll(/https:\/\/[^\s"']+\/(?:sticker|emoji)\/[^\s"']+\.(?:png|gif)/g);
+      const uniqueUrls = [...new Set([...imageUrlMatches].map(m => m[0]))];
+      
+      if (uniqueUrls.length > 0) {
+        itemsData = uniqueUrls.map((u, idx) => ({
+          id: idx + 1,
+          candidateUrls: [
+            u,
+            u.replace('png.png', 'png@2x.png'),
+            u.replace('sticker.png', 'sticker@2x.png')
+          ]
+        }));
       }
     }
   } catch (e) {}
 
-  // 3. If metadata JSON succeeded, build candidate URLs from items list
-  if (meta && itemsData.length === 0) {
-    const itemsList = meta.stickers || meta.emojis;
-    if (itemsList && Array.isArray(itemsList)) {
-      if (meta.title?.en || meta.packageTitle?.en) {
-        packTitle = meta.title?.en || meta.packageTitle?.en;
-      }
+  // 2. Fallback to Metadata JSON API if HTML didn't catch enough items
+  if (itemsData.length === 0) {
+    const metaUrls = shopType === 'emojishop' ? [
+      `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/ANDROID/productInfo.meta`,
+      `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/PC/productInfo.meta`,
+      `https://stickershop.line-scdn.net/emojishop/v1/product/${productId}/iphone/productInfo.meta`
+    ] : [
+      `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`,
+      `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/PC/productInfo.meta`
+    ];
 
-      for (let i = 0; i < itemsList.length; i++) {
-        const item = itemsList[i];
-        let candidateUrls = [];
-        if (shopType === 'emojishop') {
-          candidateUrls = [
-            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png@2x.png?v=2`,
-            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png.png?v=2`,
-            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/ANDROID/png.png?v=2`,
-            `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/PC/png.png?v=2`
-          ];
-        } else {
-          candidateUrls = [
-            `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/animation@2x.png?v=2`,
-            `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/sticker@2x.png?v=2`,
-            `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/ANDROID/sticker.png?v=2`
-          ];
+    let meta = null;
+    for (const metaUrl of metaUrls) {
+      try {
+        const res = await fetch(metaUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://store.line.me/"
+          }
+        });
+        if (res.ok) {
+          meta = await res.json();
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (meta) {
+      const itemsList = meta.stickers || meta.emojis;
+      if (itemsList && Array.isArray(itemsList)) {
+        if (meta.title?.en || meta.packageTitle?.en) {
+          packTitle = meta.title?.en || meta.packageTitle?.en;
         }
 
-        itemsData.push({
-          id: item.id,
-          candidateUrls
-        });
+        for (let i = 0; i < itemsList.length; i++) {
+          const item = itemsList[i];
+          let candidateUrls = [];
+          if (shopType === 'emojishop') {
+            candidateUrls = [
+              `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png@2x.png?v=2`,
+              `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/iPhone/png.png?v=2`,
+              `https://stickershop.line-scdn.net/emojishop/v1/emoji/${item.id}/ANDROID/png.png?v=2`
+            ];
+          } else {
+            candidateUrls = [
+              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/animation@2x.png?v=2`,
+              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/sticker@2x.png?v=2`,
+              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/ANDROID/sticker.png?v=2`
+            ];
+          }
+
+          itemsData.push({
+            id: item.id,
+            candidateUrls
+          });
+        }
       }
     }
   }
@@ -213,7 +218,6 @@ app.post("/download", async (req, res) => {
 
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
     
-    // Clean title and ensure proper zip filename
     const cleanTitle = packTitle.split('—')[0].split('|')[0].split('–')[0].trim();
     
     const safeTitle = cleanTitle
