@@ -10,7 +10,9 @@ const archiver = require("archiver");
 const chalk = require("chalk");
 const makeDir = require("make-dir");
 const ora = require("ora");
-const sharp = require("sharp"); // New: reliable APNG→GIF converter
+
+// Pure JS/WASM APNG to GIF converter
+const { convert } = require("@fiahfy/apng2gif");
 
 const app = express();
 app.use(cors());
@@ -162,7 +164,7 @@ async function probeUrl(url) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. DOWNLOAD + CONVERSION (now using Sharp)
+// 2. DOWNLOAD + CONVERSION (using @fiahfy/apng2gif)
 // ---------------------------------------------------------------------------
 
 async function downloadAndProcessItem(item, destDir, counters) {
@@ -180,42 +182,34 @@ async function downloadAndProcessItem(item, destDir, counters) {
       const buffer = Buffer.from(await res.arrayBuffer());
       if (buffer.length < 50) continue;
 
-      const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      tempPath = path.join(destDir, `tmp-${uid}.bin`);
-      fs.writeFileSync(tempPath, buffer);
-
-      // Detect APNG by looking for the acTL chunk
+      // APNGs contain the acTL chunk
       const isAnimated = buffer.includes(Buffer.from("acTL"));
 
       if (isAnimated) {
-        const tempGif = path.join(destDir, `tmp-${uid}.gif`);
         try {
-          // Sharp reads APNG as animated and outputs an animated GIF
-          await sharp(buffer, { animated: true })
-            .gif()
-            .toFile(tempGif);
-
-          const stats = fs.statSync(tempGif);
-          if (stats.size < 100) throw new Error(`Output GIF too small (${stats.size} bytes)`);
+          // Convert APNG buffer to GIF buffer using pure JS/WASM
+          const gifBuffer = await convert(buffer);
+          
+          if (!gifBuffer || gifBuffer.length < 100) {
+            throw new Error("GIF output too small");
+          }
 
           counters.gif += 1;
           const finalGif = path.join(destDir, `sticker-${counters.gif}.gif`);
-          fs.renameSync(tempGif, finalGif);
-          fs.unlinkSync(tempPath);
+          fs.writeFileSync(finalGif, gifBuffer);
           return { success: true, type: "gif" };
         } catch (convErr) {
           console.error(`[Convert Failed]: ${url}`, convErr.message);
-          try { fs.unlinkSync(tempGif); } catch (_) {}
-          // Fall through to save as PNG
+          // Fall through to PNG saving
         }
       }
 
       counters.png += 1;
       const finalPng = path.join(destDir, `sticker-${counters.png}.png`);
-      fs.renameSync(tempPath, finalPng);
+      fs.writeFileSync(finalPng, buffer);
       return { success: true, type: isAnimated ? "png-fallback" : "png" };
     } catch (_) {
-      if (tempPath) try { fs.unlinkSync(tempPath); } catch (_) {}
+      // try next url
     }
   }
   return { success: false };
