@@ -32,6 +32,10 @@ function createContext(config) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 1. SCRAPING / URL GENERATION
+// ---------------------------------------------------------------------------
+
 async function scrapeStickerData(context) {
   const { url: pageUrl } = context.config;
 
@@ -46,6 +50,7 @@ async function scrapeStickerData(context) {
   let packTitle = `${shopType === "emojishop" ? "LINE Emojis" : "LINE Stickers"} ${productId}`;
   let itemsData = [];
 
+  // ---------- EMOJI PATH ----------
   if (shopType === "emojishop") {
     try {
       const htmlRes = await fetch(pageUrl, {
@@ -78,6 +83,7 @@ async function scrapeStickerData(context) {
     }
   }
 
+  // ---------- STICKER PATH ----------
   if (shopType === "stickershop" && itemsData.length === 0) {
     try {
       const htmlRes = await fetch(pageUrl, {
@@ -164,6 +170,10 @@ async function probeUrl(url) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 2. DOWNLOAD + CONVERSION
+// ---------------------------------------------------------------------------
+
 async function downloadAndProcessItem(item, destDir, counters) {
   for (const url of item.candidateUrls) {
     let tempPath = null;
@@ -183,7 +193,8 @@ async function downloadAndProcessItem(item, destDir, counters) {
       tempPath = path.join(destDir, `tmp-${uid}.bin`);
       fs.writeFileSync(tempPath, buffer);
 
-      const isAnimated = isApng(buffer);
+      // Simple and reliable APNG check: look for the acTL chunk
+      const isAnimated = buffer.includes(Buffer.from("acTL"));
 
       if (isAnimated) {
         try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (_) {}
@@ -199,9 +210,11 @@ async function downloadAndProcessItem(item, destDir, counters) {
         } catch (convErr) {
           console.error(`[Convert Failed]:`, convErr.message);
           try { fs.unlinkSync(tempGif); } catch (_) {}
+          // Fall through to PNG handling below
         }
       }
 
+      // Static image, or conversion failed → save as PNG
       counters.png += 1;
       const finalPng = path.join(destDir, `sticker-${counters.png}.png`);
       fs.renameSync(tempPath, finalPng);
@@ -213,22 +226,9 @@ async function downloadAndProcessItem(item, destDir, counters) {
   return { success: false };
 }
 
-function isApng(buffer) {
-  if (buffer.length < 8) return false;
-  const sig = buffer.slice(0, 8);
-  if (!sig.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return false;
-  }
-  let offset = 8;
-  while (offset + 8 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.toString("ascii", offset + 4, offset + 8);
-    if (type === "acTL") return true;
-    if (type === "IDAT") return false;
-    offset += 12 + length;
-  }
-  return false;
-}
+// ---------------------------------------------------------------------------
+// 3. MAIN DOWNLOAD FLOW
+// ---------------------------------------------------------------------------
 
 async function downloadStickers(config = {}) {
   let context;
@@ -264,6 +264,10 @@ async function downloadStickers(config = {}) {
     throw err;
   }
 }
+
+// ---------------------------------------------------------------------------
+// 4. EXPRESS ROUTE
+// ---------------------------------------------------------------------------
 
 app.post("/download", async (req, res) => {
   req.setTimeout(300000);
