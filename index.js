@@ -116,15 +116,15 @@ async function downloadStickers(config = {}) {
               try {
                 const image = await apng.sharpFromApng(buffer);
                 const gifBuffer = await image.gif().toBuffer();
-                fs.writeFileSync(path.join(dest, `sticker-${i + 1}.gif`), gifBuffer);
                 gifCount++;
+                fs.writeFileSync(path.join(dest, `sticker-${gifCount}.gif`), gifBuffer);
               } catch (e) {
-                fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
                 pngCount++;
+                fs.writeFileSync(path.join(dest, `sticker-${pngCount}.png`), buffer);
               }
             } else {
-              fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
               pngCount++;
+              fs.writeFileSync(path.join(dest, `sticker-${pngCount}.png`), buffer);
             }
             downloadedCount++;
             break; // Move to next item
@@ -161,18 +161,48 @@ async function downloadStickers(config = {}) {
       spinner.text = `Extracting and processing ZIP...`;
       const zip = new AdmZip(zipBuffer);
       
-      // Filter out key images and system files, then SORT numerically
+      // 1. Get the correct order from productInfo.meta
+      const metaEntry = zip.getEntry('productInfo.meta');
+      let orderedIds = [];
+      if (metaEntry) {
+        try {
+          const meta = JSON.parse(metaEntry.getData().toString('utf8'));
+          if (meta.stickers && Array.isArray(meta.stickers)) {
+            orderedIds = meta.stickers.map(s => String(s.id));
+          }
+        } catch (e) {
+          console.error("Failed to parse productInfo.meta from ZIP", e.message);
+        }
+      }
+
+      // 2. Filter out key images and system files
       const validEntries = zip.getEntries().filter(e => {
         const n = e.entryName;
         return n.endsWith('.png') && !n.includes('_key@2x') && !n.startsWith('tab_');
-      }).sort((a, b) => {
-        // Extract the numeric ID from the filename (e.g., "123456@2x.png" -> 123456)
-        const getNum = (name) => {
-           const m = name.match(/^(\d+)/);
-           return m ? parseInt(m[1], 10) : 0;
-        };
-        return getNum(a.entryName) - getNum(b.entryName);
       });
+
+      // 3. Sort based on meta.stickers order to perfectly match the store page
+      if (orderedIds.length > 0) {
+        validEntries.sort((a, b) => {
+          const idA = a.entryName.match(/^(\d+)/)?.[1];
+          const idB = b.entryName.match(/^(\d+)/)?.[1];
+          const idxA = orderedIds.indexOf(idA);
+          const idxB = orderedIds.indexOf(idB);
+          if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+          if (idxA !== -1) return -1;
+          if (idxB !== -1) return 1;
+          return a.entryName.localeCompare(b.entryName);
+        });
+      } else {
+        // Fallback sort by numeric ID
+        validEntries.sort((a, b) => {
+          const getNum = (name) => {
+             const m = name.match(/^(\d+)/);
+             return m ? parseInt(m[1], 10) : 0;
+          };
+          return getNum(a.entryName) - getNum(b.entryName);
+        });
+      }
 
       if (validEntries.length === 0) throw new Error("The ZIP did not contain any valid sticker images.");
 
@@ -185,18 +215,18 @@ async function downloadStickers(config = {}) {
           try {
             const image = await apng.sharpFromApng(buffer);
             const gifBuffer = await image.gif().toBuffer();
-            fs.writeFileSync(path.join(dest, `sticker-${i + 1}.gif`), gifBuffer);
             gifCount++;
+            fs.writeFileSync(path.join(dest, `sticker-${gifCount}.gif`), gifBuffer);
             downloadedCount++;
           } catch (e) {
             console.error(`[Convert Failed] ${entry.entryName}:`, e.message);
-            fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
             pngCount++;
+            fs.writeFileSync(path.join(dest, `sticker-${pngCount}.png`), buffer);
             downloadedCount++;
           }
         } else {
-          fs.writeFileSync(path.join(dest, `sticker-${i + 1}.png`), buffer);
           pngCount++;
+          fs.writeFileSync(path.join(dest, `sticker-${pngCount}.png`), buffer);
           downloadedCount++;
         }
         spinner.text = `Processed ${i + 1}/${validEntries.length}...`;
