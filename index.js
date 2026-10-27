@@ -55,14 +55,7 @@ async function scrapeStickerUrls(context) {
     throw new Error(`Failed to fetch metadata: HTTP ${res.status} ${res.statusText}`);
   }
 
-  const rawText = await res.text();
-  let meta;
-  try {
-    meta = JSON.parse(rawText);
-  } catch (e) {
-    // If LINE returns HTML, this will catch it and log the first 200 chars
-    throw new Error(`LINE API did not return JSON. Response starts with: ${rawText.substring(0, 200)}`);
-  }
+  const meta = await res.json();
 
   if (!meta.stickers || !Array.isArray(meta.stickers) || meta.stickers.length === 0) {
     throw new Error("No stickers found in the product metadata.");
@@ -73,8 +66,17 @@ async function scrapeStickerUrls(context) {
 
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
+    
+    // Log the first sticker's JSON structure so we can see exactly how LINE labels it
+    if (i === 0) {
+      console.log("--- DEBUG: First Sticker JSON ---");
+      console.log(JSON.stringify(sticker, null, 2));
+      console.log("---------------------------------");
+    }
+
     let suffix = "sticker@2x.png";
     
+    // Check if it's animated or sound (APNG)
     if (sticker.stickerType === "ANIMATION" || sticker.stickerType === "SOUND") {
       suffix = "animation@2x.png";
       animatedCount++;
@@ -86,7 +88,6 @@ async function scrapeStickerUrls(context) {
     context.spinner.text = `Found ${urls.length}/${meta.stickers.length} stickers (${animatedCount} animated)...`;
   }
 
-  console.log(`Successfully scraped ${urls.length} URLs (${animatedCount} animated).`);
   return urls;
 }
 
@@ -102,32 +103,13 @@ async function downloadStickers(config = {}) {
 
     context.spinner.text = `Downloading ${urls.length} stickers...`;
     
-    // Use allSettled so one failed download doesn't kill the whole process
-    const downloadResults = await Promise.allSettled(
+    await Promise.allSettled(
       urls.map((url, i) =>
         downloadImage({ url, dest: path.join(dest, `sticker-${i + 1}.png`) })
       )
     );
 
-    let successCount = 0;
-    downloadResults.forEach((result, i) => {
-      if (result.status === "fulfilled") {
-        successCount++;
-      } else {
-        console.error(`[Download Failed] Sticker ${i + 1}:`, result.reason?.message || result.reason);
-      }
-    });
-    console.log(`Downloaded ${successCount}/${urls.length} files.`);
-
     if (convertToGif) {
-      try {
-        fs.accessSync(apng2gifBinPath, fs.constants.X_OK);
-        console.log(`[apng2gif] Binary is executable.`);
-      } catch (err) {
-        console.error(`[apng2gif] Binary is NOT executable:`, err.message);
-        try { fs.chmodSync(apng2gifBinPath, 0o755); } catch (e) {}
-      }
-
       context.spinner.text = `Converting stickers to GIF...`;
       
       await Promise.allSettled(
@@ -135,15 +117,16 @@ async function downloadStickers(config = {}) {
           const pngPath = path.join(dest, `sticker-${i + 1}.png`);
           const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
           
-          // Only attempt conversion if the PNG actually downloaded
           if (!fs.existsSync(pngPath)) return;
 
           try {
-            await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
-            console.log(`[apng2gif] Success: sticker-${i + 1}.gif`);
+            // Run the binary and capture stdout/stderr
+            const { stdout, stderr } = await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
+            console.log(`[apng2gif] SUCCESS: sticker-${i + 1}.gif`, stdout, stderr);
           } catch (err) {
-            // Static PNGs will fail here, which is expected. 
-            console.log(`[apng2gif] Skipped (likely static): sticker-${i + 1}`);
+            // If it's a static PNG, apng2gif will fail. We log the exact error to see if it's a static image or a missing library.
+            console.log(`[apng2gif] FAILED sticker-${i + 1}:`, err.message);
+            if (err.stderr) console.log(`[apng2gif] STDERR:`, err.stderr);
           }
         })
       );
@@ -193,7 +176,6 @@ app.post("/download", async (req, res) => {
     archive.pipe(output);
     archive.directory(downloadPath, false);
     
-    // Catch errors during finalize
     archive.finalize().catch(err => {
       console.error("Finalize error:", err);
       if (!res.headersSent) res.status(500).json({ error: "Failed to create zip." });
