@@ -52,6 +52,12 @@ async function scrapeStickerUrls(context) {
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage", // Crucial for Docker/Render environments
+      "--disable-gpu",           // No GPU on the server
+      "--single-process",        // Runs Chrome in a single process to save RAM
+      "--no-zygote",             // Helps with single-process mode
+      "--disable-accelerated-2d-canvas",
+      "--disable-web-security"
     ],
   });
 
