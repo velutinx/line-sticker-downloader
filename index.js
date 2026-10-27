@@ -10,9 +10,7 @@ const archiver = require("archiver");
 const chalk = require("chalk");
 const makeDir = require("make-dir");
 const ora = require("ora");
-
-// sharp-apng for reliable APNG to GIF conversion
-const sharp = require("sharp");
+const AdmZip = require("adm-zip");
 const apng = require("sharp-apng");
 
 const app = express();
@@ -30,225 +28,174 @@ function createContext(config) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// 1. SCRAPING / URL GENERATION
-// ---------------------------------------------------------------------------
-
-async function scrapeStickerData(context) {
-  const { url: pageUrl } = context.config;
-
-  const match = pageUrl.match(/\/(stickershop|emojishop)\/product\/([a-zA-Z0-9]+)/);
-  if (!match) {
-    throw new Error("Could not extract product type or ID from the provided URL.");
-  }
-
-  const shopType = match[1];
-  const productId = match[2];
-
-  let packTitle = `${shopType === "emojishop" ? "LINE Emojis" : "LINE Stickers"} ${productId}`;
-  let itemsData = [];
-
-  // ---------- EMOJI PATH ----------
-  if (shopType === "emojishop") {
-    try {
-      const htmlRes = await fetch(pageUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (htmlRes.ok) {
-        const htmlText = await htmlRes.text();
-        const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
-        if (titleMatch && titleMatch[1]) {
-          let raw = titleMatch[1].split("—")[0].split("|")[0].split("–")[0].trim();
-          if (raw) packTitle = raw;
-        }
-      }
-    } catch (_) {}
-
-    let consecutiveMisses = 0;
-    for (let i = 1; i <= 200; i++) {
-      const num = String(i).padStart(3, "0");
-      const staticUrl = `https://stickershop.line-scdn.net/sticonshop/v1/sticon/${productId}/iPhone/${num}.png`;
-      const animUrl = `https://stickershop.line-scdn.net/sticonshop/v1/sticon/${productId}/iPhone/${num}_animation.png`;
-
-      const ok = (await probeUrl(animUrl)) || (await probeUrl(staticUrl));
-      if (ok) {
-        itemsData.push({ id: i, candidateUrls: [animUrl, staticUrl] });
-        consecutiveMisses = 0;
-      } else {
-        consecutiveMisses++;
-        if (consecutiveMisses >= 5) break;
+// Helper: Fetch title from the HTML page
+async function getPackTitle(pageUrl) {
+  try {
+    const htmlRes = await fetch(pageUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (htmlRes.ok) {
+      const htmlText = await htmlRes.text();
+      const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
+      if (titleMatch && titleMatch[1]) {
+        let raw = titleMatch[1].split("—")[0].split("|")[0].split("–")[0].trim();
+        if (raw) return raw;
       }
     }
-  }
-
-  // ---------- STICKER PATH ----------
-  if (shopType === "stickershop" && itemsData.length === 0) {
-    try {
-      const htmlRes = await fetch(pageUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        },
-      });
-      if (htmlRes.ok) {
-        const htmlText = await htmlRes.text();
-
-        const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
-        if (titleMatch && titleMatch[1]) {
-          let raw = titleMatch[1].split("—")[0].split("|")[0].split("–")[0].trim();
-          if (raw) packTitle = raw;
-        }
-
-        const imageMatches = htmlText.matchAll(/https:\/\/[^\s"']+\/sticker\/[^\s"']+\.(?:png|gif)/g);
-        const uniqueUrls = [...new Set([...imageMatches].map((m) => m[0]))];
-
-        if (uniqueUrls.length > 0) {
-          itemsData = uniqueUrls.map((u, idx) => ({
-            id: idx + 1,
-            candidateUrls: [u.replace("sticker@2x.png", "animation@2x.png"), u],
-          }));
-        }
-      }
-    } catch (_) {}
-
-    if (itemsData.length === 0) {
-      const metaUrls = [
-        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`,
-        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/PC/productInfo.meta`,
-      ];
-
-      let meta = null;
-      for (const metaUrl of metaUrls) {
-        try {
-          const res = await fetch(metaUrl, {
-            headers: { "User-Agent": "Mozilla/5.0", Referer: "https://store.line.me/" },
-          });
-          if (res.ok) {
-            meta = await res.json();
-            break;
-          }
-        } catch (_) {}
-      }
-
-      if (meta && (meta.stickers || meta.emojis)) {
-        const list = meta.stickers || meta.emojis;
-        if (meta.title?.en || meta.packageTitle?.en) {
-          packTitle = meta.title?.en || meta.packageTitle?.en;
-        }
-        for (const item of list) {
-          itemsData.push({
-            id: item.id,
-            candidateUrls: [
-              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/animation@2x.png?v=2`,
-              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/iPhone/sticker@2x.png?v=2`,
-              `https://stickershop.line-scdn.net/stickershop/v1/sticker/${item.id}/ANDROID/sticker.png?v=2`,
-            ],
-          });
-        }
-      }
-    }
-  }
-
-  if (itemsData.length === 0) {
-    throw new Error("Could not find any items or metadata for this product URL.");
-  }
-
-  return { packTitle, itemsData };
+  } catch (_) {}
+  return null;
 }
 
+// Helper: Probe emoji URLs (Emojis do not have ZIPs)
 async function probeUrl(url) {
   try {
-    const res = await fetch(url, {
-      method: "HEAD",
-      headers: { "User-Agent": "Mozilla/5.0", Referer: "https://store.line.me/" },
-    });
+    const res = await fetch(url, { method: "HEAD", headers: { "User-Agent": "Mozilla/5.0", Referer: "https://store.line.me/" } });
     return res.ok;
   } catch (_) {
     return false;
   }
 }
 
-// ---------------------------------------------------------------------------
-// 2. DOWNLOAD + CONVERSION (using sharp-apng)
-// ---------------------------------------------------------------------------
+async function scrapeEmojiData(productId) {
+  let itemsData = [];
+  let consecutiveMisses = 0;
+  for (let i = 1; i <= 200; i++) {
+    const num = String(i).padStart(3, "0");
+    const staticUrl = `https://stickershop.line-scdn.net/sticonshop/v1/sticon/${productId}/iPhone/${num}.png`;
+    const animUrl = `https://stickershop.line-scdn.net/sticonshop/v1/sticon/${productId}/iPhone/${num}_animation.png`;
 
-async function downloadAndProcessItem(item, destDir, counters) {
-  for (const url of item.candidateUrls) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Referer: "https://store.line.me/",
-        },
-      });
-      if (!res.ok) continue;
-
-      const buffer = Buffer.from(await res.arrayBuffer());
-      if (buffer.length < 50) continue;
-
-      // Detect APNG by looking for the acTL chunk
-      const isAnimated = buffer.includes(Buffer.from("acTL"));
-
-      if (isAnimated) {
-        try {
-          // sharp-apng returns a sharp instance from the APNG buffer
-          const image = await apng.sharpFromApng(buffer);
-          const gifBuffer = await image.gif().toBuffer();
-
-          if (!gifBuffer || gifBuffer.length < 100) {
-            throw new Error("GIF output too small");
-          }
-
-          counters.gif += 1;
-          const finalGif = path.join(destDir, `sticker-${counters.gif}.gif`);
-          fs.writeFileSync(finalGif, gifBuffer);
-          return { success: true, type: "gif" };
-        } catch (convErr) {
-          console.error(`[Convert Failed]: ${url}`, convErr.message);
-          // Fall through to PNG saving
-        }
-      }
-
-      counters.png += 1;
-      const finalPng = path.join(destDir, `sticker-${counters.png}.png`);
-      fs.writeFileSync(finalPng, buffer);
-      return { success: true, type: isAnimated ? "png-fallback" : "png" };
-    } catch (_) {
-      // try next url
+    const ok = (await probeUrl(animUrl)) || (await probeUrl(staticUrl));
+    if (ok) {
+      itemsData.push({ candidateUrls: [animUrl, staticUrl] });
+      consecutiveMisses = 0;
+    } else {
+      consecutiveMisses++;
+      if (consecutiveMisses >= 5) break;
     }
   }
-  return { success: false };
+  return itemsData;
 }
-
-// ---------------------------------------------------------------------------
-// 3. MAIN DOWNLOAD FLOW
-// ---------------------------------------------------------------------------
 
 async function downloadStickers(config = {}) {
   let context;
   try {
     context = createContext(config);
-    const { spinner, config: { dest } } = context;
-
+    const { spinner, config: { dest, url: pageUrl } } = context;
     spinner.start();
-    const { packTitle, itemsData } = await scrapeStickerData(context);
+
+    const match = pageUrl.match(/\/(stickershop|emojishop)\/product\/([a-zA-Z0-9]+)/);
+    if (!match) throw new Error("Could not extract product ID from URL.");
+    
+    const shopType = match[1];
+    const productId = match[2];
+
+    let packTitle = await getPackTitle(pageUrl) || `LINE Pack ${productId}`;
     await makeDir(dest);
-
-    context.spinner.text = `Downloading ${itemsData.length} items for "${packTitle}"...`;
-
+    
     const counters = { gif: 0, png: 0 };
     let downloadedCount = 0;
 
-    for (let i = 0; i < itemsData.length; i++) {
-      const result = await downloadAndProcessItem(itemsData[i], dest, counters);
-      if (result.success) downloadedCount++;
-      context.spinner.text = `Processed ${downloadedCount}/${itemsData.length} items...`;
-      await sleep(120);
+    if (shopType === "emojishop") {
+      // --- EMOJI PATH ---
+      spinner.text = `Probing emoji URLs for "${packTitle}"...`;
+      const itemsData = await scrapeEmojiData(productId);
+      if (itemsData.length === 0) throw new Error("No emojis found for this pack.");
+
+      spinner.text = `Downloading ${itemsData.length} emojis...`;
+      for (let i = 0; i < itemsData.length; i++) {
+        const item = itemsData[i];
+        for (const url of item.candidateUrls) {
+          try {
+            const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", Referer: "https://store.line.me/" } });
+            if (!res.ok) continue;
+            
+            const buffer = Buffer.from(await res.arrayBuffer());
+            if (buffer.length < 50) continue;
+            
+            const isAnimated = buffer.includes(Buffer.from("acTL"));
+            if (isAnimated) {
+              try {
+                const image = await apng.sharpFromApng(buffer);
+                const gifBuffer = await image.gif().toBuffer();
+                counters.gif++;
+                fs.writeFileSync(path.join(dest, `sticker-${counters.gif}.gif`), gifBuffer);
+              } catch (e) {
+                counters.png++;
+                fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+              }
+            } else {
+              counters.png++;
+              fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+            }
+            downloadedCount++;
+            break; // Move to next item
+          } catch (_) {}
+        }
+        spinner.text = `Processed ${i + 1}/${itemsData.length}...`;
+      }
+    } else {
+      // --- STICKER PATH (ZIP DOWNLOAD) ---
+      spinner.text = `Downloading official ZIP for "${packTitle}"...`;
+      
+      const zipUrls = [
+        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/stickerpack@2x.zip`,
+        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/stickers@2x.zip`,
+        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/android/stickerpack.zip`,
+        `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/android/stickers.zip`
+      ];
+
+      let zipBuffer = null;
+      for (const url of zipUrls) {
+        try {
+          const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", Referer: "https://store.line.me/" } });
+          if (res.ok) {
+            zipBuffer = Buffer.from(await res.arrayBuffer());
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!zipBuffer) {
+        throw new Error("Could not download the official ZIP. The pack may be region-locked or unavailable.");
+      }
+
+      spinner.text = `Extracting and processing ZIP...`;
+      const zip = new AdmZip(zipBuffer);
+      
+      // Filter out key images and system files
+      const validEntries = zip.getEntries().filter(e => {
+        const n = e.entryName;
+        return n.endsWith('.png') && !n.includes('_key@2x') && !n.startsWith('tab_');
+      });
+
+      if (validEntries.length === 0) throw new Error("The ZIP did not contain any valid sticker images.");
+
+      for (let i = 0; i < validEntries.length; i++) {
+        const entry = validEntries[i];
+        const buffer = entry.getData();
+        const isAnimated = buffer.includes(Buffer.from("acTL"));
+
+        if (isAnimated) {
+          try {
+            const image = await apng.sharpFromApng(buffer);
+            const gifBuffer = await image.gif().toBuffer();
+            counters.gif++;
+            fs.writeFileSync(path.join(dest, `sticker-${counters.gif}.gif`), gifBuffer);
+            downloadedCount++;
+          } catch (e) {
+            console.error(`[Convert Failed] ${entry.entryName}:`, e.message);
+            counters.png++;
+            fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+            downloadedCount++;
+          }
+        } else {
+          counters.png++;
+          fs.writeFileSync(path.join(dest, `sticker-${counters.png}.png`), buffer);
+          downloadedCount++;
+        }
+        spinner.text = `Processed ${i + 1}/${validEntries.length}...`;
+      }
     }
 
-    spinner.succeed(
-      chalk.green(
-        `Successfully downloaded "${packTitle}" (${downloadedCount} items: ${counters.gif} GIF, ${counters.png} PNG)`
-      )
-    );
+    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} items: ${counters.gif} GIF, ${counters.png} PNG)`));
     return { packTitle, count: downloadedCount };
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
@@ -256,10 +203,6 @@ async function downloadStickers(config = {}) {
     throw err;
   }
 }
-
-// ---------------------------------------------------------------------------
-// 4. EXPRESS ROUTE
-// ---------------------------------------------------------------------------
 
 app.post("/download", async (req, res) => {
   req.setTimeout(300000);
@@ -275,14 +218,7 @@ app.post("/download", async (req, res) => {
     const { packTitle } = await downloadStickers({ url, dest: downloadPath });
 
     const cleanTitle = packTitle.split("—")[0].split("|")[0].split("–")[0].trim();
-    const safeTitle =
-      cleanTitle
-        .replace(/#/g, "No.")
-        .replace(/[%^~\[\]]/g, "")
-        .replace(/[\/\\?%*:|"<>]/g, "")
-        .replace(/\s+/g, " ")
-        .trim() || "line-pack";
-
+    const safeTitle = cleanTitle.replace(/#/g, "No.").replace(/[%^~\[\]]/g, "").replace(/[\/\\?%*:|"<>]/g, "").replace(/\s+/g, " ").trim() || "line-pack";
     const zipFilename = `${safeTitle}.zip`;
     const zipPath = path.join(__dirname, "downloads", `${tempFolderId}.zip`);
 
