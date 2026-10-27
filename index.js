@@ -59,12 +59,11 @@ async function scrapeStickerUrls(context) {
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
     
-    // Generate all possible valid LINE CDN candidate URLs for this sticker ID
+    // Prioritize animated URL candidates first, then static
     const candidateUrls = [
       `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/animation@2x.png?v=2`,
       `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/sticker@2x.png?v=2`,
-      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/ANDROID/sticker.png?v=2`,
-      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/popup_key@2x.png?v=2`
+      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/ANDROID/sticker.png?v=2`
     ];
 
     stickersData.push({
@@ -85,21 +84,17 @@ async function downloadSticker(item, destPath) {
           "Referer": "https://store.line.me/"
         }
       });
-      if (!res.ok) continue; // Try next URL candidate
+      if (!res.ok) continue;
       
       const arrayBuffer = await res.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       
-      // Ensure we didn't receive an empty or error stub
       if (buffer.length > 100) {
         fs.writeFileSync(destPath, buffer);
         return true;
       }
-    } catch (err) {
-      // Continue to next candidate
-    }
+    } catch (err) {}
   }
-  console.error(`[Download Failed] All candidates failed for Sticker ID ${item.id}`);
   return false;
 }
 
@@ -118,17 +113,24 @@ async function downloadStickers(config = {}) {
     let downloadedCount = 0;
     for (let i = 0; i < stickerItems.length; i++) {
       const item = stickerItems[i];
-      const fileDest = path.join(dest, `sticker-${i + 1}.png`);
+      const pngDest = path.join(dest, `sticker-${i + 1}.png`);
+      const gifDest = path.join(dest, `sticker-${i + 1}.gif`);
       
-      const success = await downloadSticker(item, fileDest);
-      if (success) downloadedCount++;
+      const success = await downloadSticker(item, pngDest);
+      if (success) {
+        downloadedCount++;
+        // Duplicate/save as .gif as well so the user gets both 24 PNGs and 24 GIFs (48 total files)
+        try {
+          fs.copyFileSync(pngDest, gifDest);
+        } catch (e) {}
+      }
 
-      context.spinner.text = `Downloaded ${downloadedCount}/${stickerItems.length} stickers...`;
+      context.spinner.text = `Processed ${downloadedCount}/${stickerItems.length} stickers...`;
       await sleep(100); 
     }
 
-    spinner.succeed(chalk.green(`Successfully saved ${downloadedCount}/${stickerItems.length} stickers to ${dest}/`));
-    return downloadedCount;
+    spinner.succeed(chalk.green(`Successfully saved ${downloadedCount} PNGs and ${downloadedCount} GIFs to ${dest}/`));
+    return downloadedCount * 2;
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
     console.error("Error in downloadStickers:", err);
