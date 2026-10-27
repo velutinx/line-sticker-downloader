@@ -26,7 +26,7 @@ function createContext(config) {
   };
 }
 
-async function scrapeStickerUrls(context) {
+async function scrapeStickerData(context) {
   const { url: pageUrl } = context.config;
 
   const productIdMatch = pageUrl.match(/\/product\/(\d+)/);
@@ -35,31 +35,48 @@ async function scrapeStickerUrls(context) {
   }
   const productId = productIdMatch[1];
 
+  // 1. Fetch metadata JSON for stickers
   const metaUrl = `https://stickershop.line-scdn.net/stickershop/v1/product/${productId}/iphone/productInfo.meta`;
-  
-  const res = await fetch(metaUrl, {
+  const metaRes = await fetch(metaUrl, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Referer": "https://store.line.me/"
     }
   });
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch metadata: HTTP ${res.status}`);
+  if (!metaRes.ok) {
+    throw new Error(`Failed to fetch metadata: HTTP ${metaRes.status}`);
   }
 
-  const meta = await res.json();
+  const meta = await metaRes.json();
 
   if (!meta.stickers || !Array.isArray(meta.stickers) || meta.stickers.length === 0) {
     throw new Error("No stickers found in the product metadata.");
   }
 
-  const stickersData = [];
+  // 2. Fetch the store HTML page to extract the official pack title
+  let packTitle = `line-stickers-${productId}`;
+  try {
+    const htmlRes = await fetch(pageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      }
+    });
+    if (htmlRes.ok) {
+      const htmlText = await htmlRes.text();
+      // LINE store title is typically in <p class="mdCMN08Ttl"> or <div class="faq_title"> or similar headings, let's parse via regex
+      const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
+      if (titleMatch && titleMatch[1]) {
+        packTitle = titleMatch[1].replace("— VELUTINX", "").trim();
+      }
+    }
+  } catch (e) {
+    // Fallback to ID if HTML scrape fails
+  }
 
+  const stickersData = [];
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
-    
-    // Prioritize animated URL candidates first, then static
     const candidateUrls = [
       `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/animation@2x.png?v=2`,
       `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/sticker@2x.png?v=2`,
@@ -72,7 +89,7 @@ async function scrapeStickerUrls(context) {
     });
   }
 
-  return stickersData;
+  return { packTitle, stickersData };
 }
 
 async function downloadSticker(item, destPath) {
@@ -105,32 +122,31 @@ async function downloadStickers(config = {}) {
     const { spinner, config: { dest } } = context;
 
     spinner.start();
-    const stickerItems = await scrapeStickerUrls(context);
+    const { packTitle, stickersData } = await scrapeStickerData(context);
     await makeDir(dest);
 
-    context.spinner.text = `Downloading ${stickerItems.length} stickers...`;
+    context.spinner.text = `Downloading ${stickersData.length} stickers for "${packTitle}"...`;
     
     let downloadedCount = 0;
-    for (let i = 0; i < stickerItems.length; i++) {
-      const item = stickerItems[i];
+    for (let i = 0; i < stickersData.length; i++) {
+      const item = stickersData[i];
       const pngDest = path.join(dest, `sticker-${i + 1}.png`);
       const gifDest = path.join(dest, `sticker-${i + 1}.gif`);
       
       const success = await downloadSticker(item, pngDest);
       if (success) {
         downloadedCount++;
-        // Duplicate/save as .gif as well so the user gets both 24 PNGs and 24 GIFs (48 total files)
         try {
           fs.copyFileSync(pngDest, gifDest);
         } catch (e) {}
       }
 
-      context.spinner.text = `Processed ${downloadedCount}/${stickerItems.length} stickers...`;
+      context.spinner.text = `Processed ${downloadedCount}/${stickersData.length} stickers...`;
       await sleep(100); 
     }
 
-    spinner.succeed(chalk.green(`Successfully saved ${downloadedCount} PNGs and ${downloadedCount} GIFs to ${dest}/`));
-    return downloadedCount * 2;
+    spinner.succeed(chalk.green(`Successfully downloaded "${packTitle}" (${downloadedCount} PNGs & GIFs)`));
+    return { packTitle, count: downloadedCount };
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
     console.error("Error in downloadStickers:", err);
@@ -146,17 +162,21 @@ app.post("/download", async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: "Missing LINE sticker URL" });
 
-    const folderName = `stickers-${Date.now()}`;
-    const downloadPath = path.join(__dirname, "downloads", folderName);
+    const tempFolderId = `stickers-${Date.now()}`;
+    const downloadPath = path.join(__dirname, "downloads", tempFolderId);
 
-    await downloadStickers({ url, dest: downloadPath });
+    const { packTitle } = await downloadStickers({ url, dest: downloadPath });
+    
+    // Clean pack title for safe filesystem/zip filename use
+    const safeTitle = packTitle.replace(/[\/\\?%*:|"<>]/g, "").trim() || "line-stickers";
+    const zipFilename = `${safeTitle}.zip`;
 
-    const zipPath = `${downloadPath}.zip`;
+    const zipPath = path.join(__dirname, "downloads", `${tempFolderId}.zip`);
     const output = fs.createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
 
     output.on("close", () => {
-      res.download(zipPath, `${folderName}.zip`, (err) => {
+      res.download(zipPath, zipFilename, (err) => {
         if (err) console.error("send error:", err);
         try {
           fs.rmSync(downloadPath, { recursive: true, force: true });
