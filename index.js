@@ -11,10 +11,6 @@ const chalk = require("chalk");
 const makeDir = require("make-dir");
 const ora = require("ora");
 
-const { execFile } = require("child_process");
-const util = require("util");
-const execFileAsync = util.promisify(execFile);
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -23,10 +19,10 @@ app.use(express.static(__dirname));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function createContext(config) {
-  const { url, dest = "stickers", convertToGif = false } = config;
+  const { url, dest = "stickers" } = config;
   return {
     spinner: ora("Fetching sticker data..."),
-    config: { url, dest, convertToGif },
+    config: { url, dest },
   };
 }
 
@@ -63,19 +59,17 @@ async function scrapeStickerUrls(context) {
   for (let i = 0; i < meta.stickers.length; i++) {
     const sticker = meta.stickers[i];
     
-    let isAnimated = false;
-    let primarySuffix = "sticker@2x.png";
-    
-    if (sticker.stickerType === "ANIMATION" || sticker.stickerType === "SOUND" || sticker.animation) {
-      primarySuffix = "animation@2x.png";
-      isAnimated = true;
-    }
+    // Generate all possible valid LINE CDN candidate URLs for this sticker ID
+    const candidateUrls = [
+      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/animation@2x.png?v=2`,
+      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/sticker@2x.png?v=2`,
+      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/ANDROID/sticker.png?v=2`,
+      `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/popup_key@2x.png?v=2`
+    ];
 
     stickersData.push({
       id: sticker.id,
-      primaryUrl: `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/${primarySuffix}?v=2`,
-      fallbackUrl: `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.id}/iPhone/sticker@2x.png?v=2`,
-      isAnimated
+      candidateUrls
     });
   }
 
@@ -83,31 +77,29 @@ async function scrapeStickerUrls(context) {
 }
 
 async function downloadSticker(item, destPath) {
-  const urlsToTry = [item.primaryUrl];
-  if (item.primaryUrl !== item.fallbackUrl) {
-    urlsToTry.push(item.fallbackUrl);
-  }
-
-  for (const url of urlsToTry) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const res = await fetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://store.line.me/"
-          }
-        });
-        if (!res.ok) continue; // Try fallback URL or next attempt
-        
-        const arrayBuffer = await res.arrayBuffer();
-        fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+  for (const url of item.candidateUrls) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Referer": "https://store.line.me/"
+        }
+      });
+      if (!res.ok) continue; // Try next URL candidate
+      
+      const arrayBuffer = await res.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      
+      // Ensure we didn't receive an empty or error stub
+      if (buffer.length > 100) {
+        fs.writeFileSync(destPath, buffer);
         return true;
-      } catch (err) {
-        await sleep(500);
       }
+    } catch (err) {
+      // Continue to next candidate
     }
   }
-  console.error(`[Download Failed] Sticker ID ${item.id}`);
+  console.error(`[Download Failed] All candidates failed for Sticker ID ${item.id}`);
   return false;
 }
 
@@ -115,7 +107,7 @@ async function downloadStickers(config = {}) {
   let context;
   try {
     context = createContext(config);
-    const { spinner, config: { dest, convertToGif } } = context;
+    const { spinner, config: { dest } } = context;
 
     spinner.start();
     const stickerItems = await scrapeStickerUrls(context);
@@ -131,35 +123,12 @@ async function downloadStickers(config = {}) {
       const success = await downloadSticker(item, fileDest);
       if (success) downloadedCount++;
 
-      context.spinner.text = `Downloaded ${downloadedCount}/${stickerItems.length}...`;
-      await sleep(150); 
+      context.spinner.text = `Downloaded ${downloadedCount}/${stickerItems.length} stickers...`;
+      await sleep(100); 
     }
 
-    if (convertToGif) {
-      context.spinner.text = `Converting animated stickers to GIF...`;
-      let successGifs = 0;
-
-      for (let i = 0; i < stickerItems.length; i++) {
-        const pngPath = path.join(dest, `sticker-${i + 1}.png`);
-        const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
-        
-        if (!fs.existsSync(pngPath)) continue;
-
-        try {
-          // Use system-installed 'apng2gif' command directly
-          await execFileAsync("apng2gif", [pngPath, gifPath]);
-          if (fs.existsSync(gifPath)) {
-            successGifs++;
-          }
-        } catch (err) {
-          // Static PNGs will fail conversion naturally, which is expected.
-        }
-      }
-      console.log(`Converted ${successGifs} GIFs successfully.`);
-    }
-
-    spinner.succeed(chalk.green(`Saved stickers to ${dest}/`));
-    return stickerItems.length;
+    spinner.succeed(chalk.green(`Successfully saved ${downloadedCount}/${stickerItems.length} stickers to ${dest}/`));
+    return downloadedCount;
   } catch (err) {
     if (context) context.spinner.fail(chalk.red(err.message));
     console.error("Error in downloadStickers:", err);
@@ -172,13 +141,13 @@ app.post("/download", async (req, res) => {
   res.setTimeout(300000);
 
   try {
-    const { url, convertToGif = true } = req.body;
+    const { url } = req.body;
     if (!url) return res.status(400).json({ error: "Missing LINE sticker URL" });
 
     const folderName = `stickers-${Date.now()}`;
     const downloadPath = path.join(__dirname, "downloads", folderName);
 
-    await downloadStickers({ url, dest: downloadPath, convertToGif });
+    await downloadStickers({ url, dest: downloadPath });
 
     const zipPath = `${downloadPath}.zip`;
     const output = fs.createWriteStream(zipPath);
