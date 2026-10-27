@@ -17,10 +17,10 @@ const { execFile } = require("child_process");
 const util = require("util");
 const execFileAsync = util.promisify(execFile);
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 // Get the path to the bundled apng2gif binary
 const apng2gifBinPath = require("apng2gif-bin");
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const app = express();
 
@@ -32,7 +32,7 @@ function createContext(config) {
   const {
     url,
     dest = "stickers",
-    animatedWaitDelay = 1000,
+    animatedWaitDelay = 3000, // Increased default wait time
     convertToGif = false,
   } = config;
 
@@ -175,15 +175,23 @@ async function downloadStickers(config = {}) {
     );
 
     if (convertToGif) {
+      // --- DIAGNOSTIC CHECKS ---
+      try {
+        fs.accessSync(apng2gifBinPath, fs.constants.X_OK);
+        console.log(`[apng2gif] Binary is executable: ${apng2gifBinPath}`);
+      } catch (err) {
+        console.error(`[apng2gif] Binary is NOT executable or missing: ${apng2gifBinPath}`, err.message);
+        try {
+          fs.chmodSync(apng2gifBinPath, 0o755);
+          console.log(`[apng2gif] Attempted to chmod binary to 755.`);
+        } catch (chmodErr) {
+          console.error(`[apng2gif] Failed to chmod binary:`, chmodErr.message);
+        }
+      }
+      // --- END DIAGNOSTIC CHECKS ---
+
       context.spinner.text =
         `Converting ${urls.length} stickers to GIF...`;
-
-      // Ensure the binary is executable
-      try {
-        fs.chmodSync(apng2gifBinPath, 0o755);
-      } catch (err) {
-        console.warn("Could not chmod apng2gif binary:", err.message);
-      }
 
       await Promise.all(
         urls.map(async (url, i) => {
@@ -192,8 +200,9 @@ async function downloadStickers(config = {}) {
           
           try {
             await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
+            console.log(`[apng2gif] Success: ${pngPath} -> ${gifPath}`);
           } catch (err) {
-            console.error(`Failed to convert ${pngPath}:`, err.message);
+            console.error(`[apng2gif] Failed to convert ${pngPath}:`, err);
           }
         })
       );
@@ -221,7 +230,7 @@ app.post("/download", async (req, res) => {
     const {
       url,
       convertToGif = false,
-      animatedWaitDelay = 1000,
+      animatedWaitDelay = 3000, // Increased default here as well
     } = req.body;
 
     if (!url) {
@@ -248,6 +257,7 @@ app.post("/download", async (req, res) => {
       },
     });
 
+    // Attach listeners BEFORE finalize
     output.on("close", () => {
       res.download(
         zipPath,
