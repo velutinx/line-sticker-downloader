@@ -54,24 +54,27 @@ async function scrapeStickerData(context) {
     throw new Error("No stickers found in the product metadata.");
   }
 
-  // 2. Fetch the store HTML page to extract the clean pack title
-  let packTitle = `line-stickers-${productId}`;
-  try {
-    const htmlRes = await fetch(pageUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  // 2. Extract title from metadata JSON if available, or fetch HTML with full browser headers as fallback
+  let packTitle = meta.title?.en || meta.packageTitle?.en || `LINE Stickers ${productId}`;
+  
+  if (!meta.title && !meta.packageTitle) {
+    try {
+      const htmlRes = await fetch(pageUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5"
+        }
+      });
+      if (htmlRes.ok) {
+        const htmlText = await htmlRes.text();
+        const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
+        if (titleMatch && titleMatch[1]) {
+          let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
+          if (rawTitle) packTitle = rawTitle;
+        }
       }
-    });
-    if (htmlRes.ok) {
-      const htmlText = await htmlRes.text();
-      const titleMatch = htmlText.match(/<p class="mdCMN08Ttl">([^<]+)<\/p>/) || htmlText.match(/<title>([^<]+)<\/title>/);
-      if (titleMatch && titleMatch[1]) {
-        let rawTitle = titleMatch[1].split('—')[0].split('|')[0].trim();
-        if (rawTitle) packTitle = rawTitle;
-      }
-    }
-  } catch (e) {
-    // Fallback to ID if HTML scrape fails
+    } catch (e) {}
   }
 
   const stickersData = [];
