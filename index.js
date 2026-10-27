@@ -13,12 +13,14 @@ const makeDir = require("make-dir");
 const downloadImage = require("image-downloader").image;
 const ora = require("ora");
 
-// Replaced apng2gif npm package with child_process
 const { execFile } = require("child_process");
 const util = require("util");
 const execFileAsync = util.promisify(execFile);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Get the path to the bundled apng2gif binary
+const apng2gifBinPath = require("apng2gif-bin");
 
 const app = express();
 
@@ -56,7 +58,7 @@ async function scrapeStickerUrls(context) {
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage", // Crucial for Render/Docker
+      "--disable-dev-shm-usage",
       "--disable-gpu",
       "--single-process",
       "--no-zygote",
@@ -67,13 +69,11 @@ async function scrapeStickerUrls(context) {
 
   const page = await browser.newPage();
 
-  // Increase timeout to 90 seconds and use domcontentloaded
   await page.goto(pageUrl, {
     waitUntil: "domcontentloaded",
     timeout: 90000,
   });
 
-  // Wait for the sticker elements to render
   try {
     await page.waitForSelector('ul > li [style^="background-image"]', {
       timeout: 90000,
@@ -119,7 +119,6 @@ async function scrapeStickerUrls(context) {
         canvasHandles[1]
       );
     } else {
-      // Fixed regex to cleanly extract the URL from the CSS wrapper
       url = await page.evaluate(
         (el) =>
           el.style.backgroundImage.replace(
@@ -179,14 +178,20 @@ async function downloadStickers(config = {}) {
       context.spinner.text =
         `Converting ${urls.length} stickers to GIF...`;
 
+      // Ensure the binary is executable
+      try {
+        fs.chmodSync(apng2gifBinPath, 0o755);
+      } catch (err) {
+        console.warn("Could not chmod apng2gif binary:", err.message);
+      }
+
       await Promise.all(
         urls.map(async (url, i) => {
           const pngPath = path.join(dest, `sticker-${i + 1}.png`);
           const gifPath = path.join(dest, `sticker-${i + 1}.gif`);
           
           try {
-            // Calls the system-installed apng2gif binary
-            await execFileAsync("apng2gif", [pngPath, gifPath]);
+            await execFileAsync(apng2gifBinPath, [pngPath, gifPath]);
           } catch (err) {
             console.error(`Failed to convert ${pngPath}:`, err.message);
           }
@@ -243,7 +248,6 @@ app.post("/download", async (req, res) => {
       },
     });
 
-    // Attach listeners BEFORE finalize
     output.on("close", () => {
       res.download(
         zipPath,
