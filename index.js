@@ -11,8 +11,9 @@ const chalk = require("chalk");
 const makeDir = require("make-dir");
 const ora = require("ora");
 
-// Pure JS/WASM APNG to GIF converter
-const { convert } = require("@fiahfy/apng2gif");
+// sharp-apng for reliable APNG to GIF conversion
+const sharp = require("sharp");
+const apng = require("sharp-apng");
 
 const app = express();
 app.use(cors());
@@ -47,6 +48,7 @@ async function scrapeStickerData(context) {
   let packTitle = `${shopType === "emojishop" ? "LINE Emojis" : "LINE Stickers"} ${productId}`;
   let itemsData = [];
 
+  // ---------- EMOJI PATH ----------
   if (shopType === "emojishop") {
     try {
       const htmlRes = await fetch(pageUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
@@ -77,6 +79,7 @@ async function scrapeStickerData(context) {
     }
   }
 
+  // ---------- STICKER PATH ----------
   if (shopType === "stickershop" && itemsData.length === 0) {
     try {
       const htmlRes = await fetch(pageUrl, {
@@ -164,12 +167,11 @@ async function probeUrl(url) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. DOWNLOAD + CONVERSION (using @fiahfy/apng2gif)
+// 2. DOWNLOAD + CONVERSION (using sharp-apng)
 // ---------------------------------------------------------------------------
 
 async function downloadAndProcessItem(item, destDir, counters) {
   for (const url of item.candidateUrls) {
-    let tempPath = null;
     try {
       const res = await fetch(url, {
         headers: {
@@ -182,14 +184,15 @@ async function downloadAndProcessItem(item, destDir, counters) {
       const buffer = Buffer.from(await res.arrayBuffer());
       if (buffer.length < 50) continue;
 
-      // APNGs contain the acTL chunk
+      // Detect APNG by looking for the acTL chunk
       const isAnimated = buffer.includes(Buffer.from("acTL"));
 
       if (isAnimated) {
         try {
-          // Convert APNG buffer to GIF buffer using pure JS/WASM
-          const gifBuffer = await convert(buffer);
-          
+          // sharp-apng returns a sharp instance from the APNG buffer
+          const image = await apng.sharpFromApng(buffer);
+          const gifBuffer = await image.gif().toBuffer();
+
           if (!gifBuffer || gifBuffer.length < 100) {
             throw new Error("GIF output too small");
           }
